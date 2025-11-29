@@ -1,4 +1,3 @@
-// TriSense.h
 #ifndef TRISENSE_H
 #define TRISENSE_H
 
@@ -67,9 +66,6 @@ protected:
   // Helper to convert quaternion to Euler angles (in radians)
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
 
-  // Initialize initial orientation using accel and mag
-  void initOrientation(int samples = 100);
-
 public:
   TriSenseFusion(ICM42688P* imu, AK09918C* mag);
 
@@ -90,6 +86,9 @@ public:
 
   // Get current orientation in degrees (roll, pitch, yaw)
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
+
+  // Initialize initial orientation using accel and mag
+  void initOrientation(int samples = 100);
 
   // Virtual update method to be implemented by subclasses
   virtual bool update() = 0;
