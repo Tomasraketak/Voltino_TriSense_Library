@@ -21,9 +21,9 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin) {
   }
 
   // Default configurations
-  bmp.setOversampling(DEFAULT_OSR_P, DEFAULT_OSR_T);
-  bmp.setODR(DEFAULT_ODR);
-  bmp.setPowerMode(DEFAULT_MODE);
+  bmp.setOversampling(BMP580_OSR_x4, BMP580_OSR_x4);
+  bmp.setODR(BMP580_ODR_240Hz);
+  bmp.setPowerMode(BMP580_MODE_NORMAL);
 
   mag.setODR(100);
 
