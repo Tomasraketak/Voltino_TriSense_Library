@@ -39,9 +39,6 @@ protected:
   ICM42688P* _imu;
   AK09918C* _mag;
 
-  // Quaternion (w, x, y, z)
-  float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-
   // Gyro offsets
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};
 
@@ -67,6 +64,9 @@ protected:
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
 
 public:
+  // Quaternion (w, x, y, z) - Public access
+  float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
   TriSenseFusion(ICM42688P* imu, AK09918C* mag);
 
   // Set custom gyro offsets
@@ -124,7 +124,15 @@ private:
   float gyroBiasZ = 0.0f;
   float lastDeltaYawRad = 0.0f;
 
-  const unsigned long correctionIntervalUs = 10000; // 100Hz corrections
+  // Accumulation for acceleration
+  float axSum = 0.0f;
+  float aySum = 0.0f;
+  float azSum = 0.0f;
+  int accSamples = 0;
+
+  // ZMENA: Interval pro kontrolu magnetometru
+  unsigned long magReadIntervalUs = 500; // Default 0.5ms
+  unsigned long lastMagReadAttempt = 0;
 
   // Gaussian gain function
   float gaussianGain(float x, float mu, float sigma);
@@ -136,7 +144,7 @@ private:
   void gyroIntegration(float gx, float gy, float gz, float dt);
 
   // Correction step
-  void complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz);
+  void complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float dt);
 
 public:
   AdvancedTriFusion(ICM42688P* imu, AK09918C* mag);
@@ -147,6 +155,9 @@ public:
   void setMagTiltSigma(float sigmaDeg);
   void setYawKi(float ki);
   void setMaxGains(float maxAccel, float maxMag);
+
+  // ZMENA: Nastavení limitu pro čtení magnetometru
+  void setMagReadInterval(unsigned long us);
 
   // Update fusion state
   bool update() override;

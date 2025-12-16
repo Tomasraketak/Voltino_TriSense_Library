@@ -106,7 +106,6 @@ void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw
 }
 
 void TriSenseFusion::initOrientation(int samples) {
-  // Average accel and mag for initial orientation
   float axSum = 0, aySum = 0, azSum = 0;
   float mxSum = 0, mySum = 0, mzSum = 0;
   int validSamples = 0;
@@ -211,7 +210,12 @@ bool SimpleTriFusion::update() {
 }
 
 // AdvancedTriFusion
-AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
+AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {
+  axSum = 0; aySum = 0; azSum = 0;
+  accSamples = 0;
+  magReadIntervalUs = 500; // default 0.5ms
+  lastMagReadAttempt = 0;
+}
 
 void AdvancedTriFusion::setAccelGaussian(float ref, float sigma) {
   accRef = ref;
@@ -234,6 +238,11 @@ void AdvancedTriFusion::setYawKi(float ki) {
 void AdvancedTriFusion::setMaxGains(float maxAccel, float maxMag) {
   maxAccelGain = maxAccel;
   maxMagGain = maxMag;
+}
+
+// ZMENA: Implementace setteru pro interval čtení magnetometru
+void AdvancedTriFusion::setMagReadInterval(unsigned long us) {
+  magReadIntervalUs = us;
 }
 
 float AdvancedTriFusion::gaussianGain(float x, float mu, float sigma) {
@@ -274,7 +283,7 @@ void AdvancedTriFusion::gyroIntegration(float gx, float gy, float gz, float dt) 
   q[3] *= recipNorm;
 }
 
-void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz) {
+void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float dt) {
   float totalAccelG = sqrt(ax * ax + ay * ay + az * az);
   float recipNorm = 1.0f / totalAccelG;
   ax *= recipNorm;
@@ -309,7 +318,7 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
 
   float roll_corr, pitch_corr, yaw_corr;
-  getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr); // Denormalized for atan2
+  getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
 
   float yaw_deg = yaw_rad * 180.0f / PI;
   if (yaw_deg < 0) yaw_deg += 360.0f;
@@ -323,12 +332,11 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
     gyroBiasZ = 0.0f;
   }
   lastDeltaYawRad = delta_yaw_rad;
-  float correction_dt = correctionIntervalUs / 1000000.0f;
-  gyroBiasZ -= yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
+  gyroBiasZ -= yawKi * delta_yaw_rad * final_mag_gain * dt;
 
-  float w_x = final_accel_gain * ex * correction_dt;
-  float w_y = final_accel_gain * ey * correction_dt;
-  float w_z = final_mag_gain * delta_yaw_rad * correction_dt;
+  float w_x = final_accel_gain * ex * dt;
+  float w_y = final_accel_gain * ey * dt;
+  float w_z = final_mag_gain * delta_yaw_rad * dt;
 
   float q0_old = q[0];
   float q1_old = q[1];
@@ -349,7 +357,8 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
 
 bool AdvancedTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
-  if (!_imu->readFIFO(ax, ay, az, gx, gy, gz) || !_mag->readData()) return false;
+
+  if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
   ax -= accelOffset[0];
   ay -= accelOffset[1];
@@ -370,16 +379,39 @@ bool AdvancedTriFusion::update() {
 
   gyroIntegration(gx, gy, gz, dt);
 
-  float temp_x = _mag->x - magHardIron[0];
-  float temp_y = _mag->y - magHardIron[1];
-  float temp_z = _mag->z - magHardIron[2];
-  float mx = magSoftIron[0][0] * temp_x + magSoftIron[0][1] * temp_y + magSoftIron[0][2] * temp_z;
-  float my = magSoftIron[1][0] * temp_x + magSoftIron[1][1] * temp_y + magSoftIron[1][2] * temp_z;
-  float mz = magSoftIron[2][0] * temp_x + magSoftIron[2][1] * temp_y + magSoftIron[2][2] * temp_z;
+  axSum += ax;
+  aySum += ay;
+  azSum += az;
+  accSamples++;
 
-  if (now - lastCorrectionTime >= correctionIntervalUs) {
-    complementaryCorrection(ax, ay, az, mx, my, mz);
-    lastCorrectionTime = now;
+  // ZMENA: Kontrola, zda uplynul dostatečný čas pro pokus o čtení magnetometru
+  if (now - lastMagReadAttempt >= magReadIntervalUs) {
+    lastMagReadAttempt = now;
+
+    // Pokus o čtení
+    if (_mag->readData()) {
+      float temp_x = _mag->x - magHardIron[0];
+      float temp_y = _mag->y - magHardIron[1];
+      float temp_z = _mag->z - magHardIron[2];
+      float mx = magSoftIron[0][0] * temp_x + magSoftIron[0][1] * temp_y + magSoftIron[0][2] * temp_z;
+      float my = magSoftIron[1][0] * temp_x + magSoftIron[1][1] * temp_y + magSoftIron[1][2] * temp_z;
+      float mz = magSoftIron[2][0] * temp_x + magSoftIron[2][1] * temp_y + magSoftIron[2][2] * temp_z;
+
+      float correction_dt = (now - lastCorrectionTime) / 1000000.0f;
+      if (correction_dt <= 0) correction_dt = 0.01f;
+
+      if (accSamples > 0) {
+        float avgAx = axSum / accSamples;
+        float avgAy = aySum / accSamples;
+        float avgAz = azSum / accSamples;
+
+        complementaryCorrection(avgAx, avgAy, avgAz, mx, my, mz, correction_dt);
+      }
+
+      axSum = 0; aySum = 0; azSum = 0;
+      accSamples = 0;
+      lastCorrectionTime = now;
+    }
   }
 
   return true;
