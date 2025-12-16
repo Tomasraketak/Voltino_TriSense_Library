@@ -6,25 +6,26 @@
 #include <SPI.h>
 #include "BMP580.h"
 #include "AK09918C.h"
-#include "ICM42688P_voltino.h"
+#include "ICM42688P_voltino.h" // Ujisti se, že název sedí s tvým souborem
 
 enum TriSenseMode {
-  MODE_I2C,     // All sensors on I2C
-  MODE_HYBRID   // AK and BMP on I2C, ICM on SPI
+  MODE_I2C,     // Vše na I2C
+  MODE_HYBRID   // AK a BMP na I2C, ICM na SPI (Doporučeno pro raketu)
 };
 
 class TriSense {
 public:
-  BMP580 bmp;       // Pressure and temperature sensor
-  AK09918C mag;     // Magnetometer
-  ICM42688P imu;    // IMU (accelerometer and gyroscope)
+  BMP580 bmp;       // Tlak a teplota
+  AK09918C mag;     // Magnetometr
+  ICM42688P imu;    // Akcelerometr a gyroskop
 
   TriSense();
 
-  // Initialize all sensors at once
+  // Inicializuje všechny senzory najednou
+  // spiCsPin se použije pouze pokud je mode == MODE_HYBRID
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17);
 
-  // Initialize individual sensors
+  // Inicializace jednotlivých senzorů
   bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
   bool beginMAG();
   bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17);
@@ -35,94 +36,34 @@ private:
 
 // Base class for sensor fusion
 class TriSenseFusion {
-protected:
+public: // *** ZMĚNA: ZDE BYLO PROTECTED, NYNÍ PUBLIC ***
+        // Díky tomu můžeš číst q[4] a měnit sigma parametry přímo ze sketche.
+  
   ICM42688P* _imu;
   AK09918C* _mag;
 
-  // Gyro offsets
-  float gyroOffset[3] = {0.0f, 0.0f, 0.0f};
-
-  // Accel offsets
-  float accelOffset[3] = {0.0f, 0.0f, 0.0f};
-
-  // Magnetometer hard-iron offsets
-  float magHardIron[3] = {0.0f, 0.0f, 0.0f};
-
-  // Magnetometer soft-iron matrix
-  float magSoftIron[3][3] = {
-    {1.0f, 0.0f, 0.0f},
-    {0.0f, 1.0f, 0.0f},
-    {0.0f, 0.0f, 1.0f}
-  };
-
-  // Magnetic declination in degrees
-  float declination = 0.0f;
-
-  unsigned long lastTime = 0;
-
-  // Helper to convert quaternion to Euler angles (in radians)
-  void quaternionToEuler(float& roll, float& pitch, float& yaw);
-
-public:
-  // Quaternion (w, x, y, z) - Public access
+  // Quaternion (w, x, y, z)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
-  TriSenseFusion(ICM42688P* imu, AK09918C* mag);
+  // Calibration data
+  float gyroOffset[3] = {0, 0, 0};
+  float accelOffset[3] = {0, 0, 0};
+  float magHardIron[3] = {0, 0, 0};
+  float magSoftIron[2][3] = {{1, 0, 0}, {0, 1, 0}}; // Zjednodušeno 2D nebo 3x3 dle implementace
 
-  // Set custom gyro offsets
-  void setGyroOffsets(float ox, float oy, float oz);
-
-  // Set custom accel offsets
-  void setAccelOffsets(float ox, float oy, float oz);
-
-  // Set custom mag hard-iron offsets
-  void setMagHardIron(float ox, float oy, float oz);
-
-  // Set custom mag soft-iron matrix
-  void setMagSoftIron(float matrix[3][3]);
-
-  // Set magnetic declination in degrees
-  void setDeclination(float deg);
-
-  // Get current orientation in degrees (roll, pitch, yaw)
-  void getOrientationDegrees(float& roll, float& pitch, float& yaw);
-
-  // Initialize initial orientation using accel and mag
-  void initOrientation(int samples = 100);
-
-  // Virtual update method to be implemented by subclasses
-  virtual bool update() = 0;
-};
-
-// Simple fusion: Gyro integration with initial orientation
-class SimpleTriFusion : public TriSenseFusion {
-private:
-  // No additional parameters for simple fusion
-
-public:
-  SimpleTriFusion(ICM42688P* imu, AK09918C* mag);
-
-  // Update fusion state
-  bool update() override;
-};
-
-// Advanced fusion: Complementary filter with dynamic gains
-class AdvancedTriFusion : public TriSenseFusion {
-private:
-  // Default Gaussian parameters
-  float accRef = 1.0f;          // Accel reference (1G)
-  float accSigma = 0.0175f;     // Accel sigma
-  float magRef = 50.88f;        // Mag reference norm (uT)
-  float magSigma = 3.5f;        // Mag sigma
-  float magTiltSigmaDeg = 15.0f;// Tilt sigma for mag gain (degrees)
-  float yawKi = 0.005f;         // Yaw bias KI (1/s)
-  float maxAccelGain = 0.5f;    // Max accel gain
-  float maxMagGain = 0.5f;      // Max mag gain
+  // Default Gaussian parameters (pro adaptivní filtr)
+  float accRef = 1.0f;          // Reference 1G
+  float accSigma = 0.0175f;     // Tolerance akcelerometru (pro start rakety nutno snížit/upravit)
+  float magRef = 50.88f;        // Reference síly mag. pole (uT)
+  float magSigma = 3.5f;        // Tolerance magnetometru
+  float magTiltSigmaDeg = 15.0f;// Tilt sigma
+  float yawKi = 0.005f;         // Integral gain pro yaw
+  float maxAccelGain = 0.5f;    // Omezení maximálního vlivu akcelerometru
+  float maxMagGain = 0.5f;      // Omezení maximálního vlivu magnetometru
 
   // Internal state
-  unsigned long lastCorrectionTime = 0;
+  unsigned long lastTime = 0;
   float gyroBiasZ = 0.0f;
-  float lastDeltaYawRad = 0.0f;
 
   // Accumulation for acceleration
   float axSum = 0.0f;
@@ -130,8 +71,8 @@ private:
   float azSum = 0.0f;
   int accSamples = 0;
 
-  // ZMENA: Interval pro kontrolu magnetometru
-  unsigned long magReadIntervalUs = 500; // Default 0.5ms
+  // Interval pro kontrolu magnetometru (šetření CPU)
+  unsigned long magReadIntervalUs = 2000; // Čteme mag méně často (např. 500Hz)
   unsigned long lastMagReadAttempt = 0;
 
   // Gaussian gain function
@@ -147,20 +88,35 @@ private:
   void complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float dt);
 
 public:
-  AdvancedTriFusion(ICM42688P* imu, AK09918C* mag);
+  TriSenseFusion(ICM42688P* imu, AK09918C* mag);
+  
+  // Hlavní update funkce
+  virtual bool update() = 0;
 
-  // Set custom Gaussian parameters
+  // Helpery
+  void initOrientation(int samples = 100);
+  void getOrientationDegrees(float& roll, float& pitch, float& yaw);
+  
+  // Setters
   void setAccelGaussian(float ref, float sigma);
-  void setMagGaussian(float ref, float sigma);
-  void setMagTiltSigma(float sigmaDeg);
-  void setYawKi(float ki);
-  void setMaxGains(float maxAccel, float maxMag);
+  void setMagGaussian(float ref, float sigma, float tiltSigma);
+  void setGains(float maxAcc, float maxMag, float ki);
+  void setDeclination(float deg);
 
-  // ZMENA: Nastavení limitu pro čtení magnetometru
-  void setMagReadInterval(unsigned long us);
+  float magneticDeclination = 0.0f;
+};
 
-  // Update fusion state
+// Advanced implementation using Adaptive Complementary Filter
+class AdvancedTriFusion : public TriSenseFusion {
+public:
+  AdvancedTriFusion(ICM42688P* imu, AK09918C* mag);
   bool update() override;
+  
+  // Veřejné metody pro nastavení limitů zisku (užitečné pro ladění za letu)
+  void setMaxGains(float accGain, float magGain) {
+      maxAccelGain = accGain;
+      maxMagGain = magGain;
+  }
 };
 
 #endif
