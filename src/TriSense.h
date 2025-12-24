@@ -22,16 +22,28 @@ public:
   TriSense();
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17);
   
-  // Helper funkce
+  // Helper funkce pro jednotlivé senzory
   bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
   bool beginMAG();
   bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17);
+
+  // --- NOVÉ KALIBRAČNÍ FUNKCE (Wrappery pro ICM42688P) ---
+  // Tyto funkce volají přímo vylepšené metody z aktualizované knihovny ICM
+  
+  // Smaže HW offsety v čipu (použij, pokud se senzor chová divně)
+  void resetHardwareOffsets();
+  
+  // Automatická kalibrace gyra (senzor musí být v klidu)
+  void autoCalibrateGyro(uint16_t samples = 1000);
+  
+  // Interaktivní 6-bodová kalibrace akcelerometru (přes Serial)
+  void autoCalibrateAccel(); 
 
 private:
   TriSenseMode _mode;
 };
 
-// --- FUSION CLASS ---
+// --- FUSION CLASS (Beze změn, ale čti poznámku níže*) ---
 class TriSenseFusion {
 public: 
   ICM42688P* _imu;
@@ -65,7 +77,7 @@ public:
 
   unsigned long lastTime = 0;
   
-  // NOVÉ: Interval kontroly magnetometru
+  // Interval kontroly magnetometru
   unsigned long magCheckIntervalUs = 500; // Default 0.5ms
 
   // Interní metody
@@ -80,7 +92,10 @@ public:
   virtual bool update() = 0;
   
   // Funkce pro kalibraci a init
+  // POZOR: Pokud použiješ autoCalibrateAccel() přímo na senzoru, 
+  // tato funkce calibrateAccelStatic() už není potřeba (nebo by mohla způsobit dvojí korekci).
   void calibrateAccelStatic(int samples = 1000);
+  
   void initOrientation(int samples = 200);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
@@ -98,7 +113,6 @@ public:
   void setYawKi(float ki);
   void setMaxGains(float accelGain, float magGain);
 
-  // NOVÉ: Setter pro interval kontroly magnetometru
   void setMagCheckInterval(float intervalMs);
 };
 
@@ -113,13 +127,12 @@ public:
 class AdvancedTriFusion : public TriSenseFusion {
 private:
   // Interní proměnné pro korekci
-  unsigned long lastMagCheckTime = 0; // Kdy jsme naposledy kontrolovali "jsou data?"
-  unsigned long lastSuccessfulCorrectionTime = 0; // Kdy naposledy proběhla korekce (pro dt biasu)
+  unsigned long lastMagCheckTime = 0; 
+  unsigned long lastSuccessfulCorrectionTime = 0; 
   
   float gyroBiasZ = 0.0f;
   float lastDeltaYawRad = 0.0f;
 
-  // Upraveno: bere dynamický dt
   void complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt);
 
 public:

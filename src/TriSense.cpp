@@ -30,6 +30,19 @@ bool TriSense::beginBMP(uint8_t addr) { return bmp.begin(addr); }
 bool TriSense::beginMAG() { return mag.begin(); }
 bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin) { return imu.begin(busType, csPin); }
 
+// --- NOVÉ WRAPPERY PRO ICM42688P ---
+void TriSense::resetHardwareOffsets() {
+  imu.resetHardwareOffsets();
+}
+
+void TriSense::autoCalibrateGyro(uint16_t samples) {
+  imu.autoCalibrateGyro(samples);
+}
+
+void TriSense::autoCalibrateAccel() {
+  imu.autoCalibrateAccel();
+}
+
 // --- TriSenseFusion Implementation ---
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
 
@@ -84,7 +97,6 @@ void TriSenseFusion::setMaxGains(float accelGain, float magGain) {
   maxMagGain = magGain;
 }
 
-// NOVÉ: Nastavení intervalu kontroly Mag
 void TriSenseFusion::setMagCheckInterval(float intervalMs) {
   magCheckIntervalUs = (unsigned long)(intervalMs * 1000.0f);
 }
@@ -111,6 +123,8 @@ void TriSenseFusion::initOrientation(int samples) {
   while(count < samples) {
      float ax, ay, az, gx, gy, gz;
      if(_imu->readFIFO(ax, ay, az, gx, gy, gz) && _mag->readData()) {
+         // Zde aplikujeme FUSION offsety (accelOffset)
+         // Pokud jsi použil autoCalibrateAccel() na IMU, accelOffset by měl být [0,0,0]
          ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
          axSum+=ax; aySum+=ay; azSum+=az;
          
@@ -197,7 +211,7 @@ bool SimpleTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
-  // Aplikace offsetů
+  // Aplikace Fusion offsetů (pozor na dvojí odečet, viz komentář v headeru)
   ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
   gx -= gyroOffset[0];  gy -= gyroOffset[1];  gz -= gyroOffset[2];
 
@@ -206,7 +220,6 @@ bool SimpleTriFusion::update() {
   if (dt <= 0) dt = 0.000125f; 
   lastTime = now;
 
-  // Jen integrace gyra
   gyroIntegration(gx * PI/180.0f, gy * PI/180.0f, gz * PI/180.0f, dt);
   return true;
 }
@@ -216,15 +229,13 @@ AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFu
 
 void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt) {
   float totalAccelG = sqrt(ax * ax + ay * ay + az * az);
-  // Normalizace vektorů
   float recipNorm = 1.0f / totalAccelG;
   ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
 
   float magStrength = sqrt(mx * mx + my * my + mz * mz);
   recipNorm = 1.0f / magStrength;
-  float mxNorm = mx * recipNorm; // používáme lokální proměnné pro normalizované hodnoty
+  float mxNorm = mx * recipNorm; 
   
-  // Vypočet error vektoru (cross product estimated vs measured)
   float vx = 2.0f * (q[1] * q[3] - q[0] * q[2]);
   float vy = 2.0f * (q[0] * q[1] + q[2] * q[3]);
   float vz = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
@@ -232,14 +243,12 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float ex = (ay * vz - az * vy);
   float ey = (az * vx - ax * vz);
 
-  // Výpočet zisku
   float g_gain_accel_raw = gaussianGain(totalAccelG, accRef, accSigma);
   float g_gain_mag_raw = gaussianGain(magStrength, magRef, magSigma);
 
   float final_accel_gain = g_gain_accel_raw * maxAccelGain;
   float final_mag_gain = g_gain_mag_raw * maxMagGain;
 
-  // Tilt compensation gain
   float roll_rad, pitch_rad, yaw_rad;
   quaternionToEuler(roll_rad, pitch_rad, yaw_rad);
   float roll_deg = roll_rad * 180.0f / PI;
@@ -249,7 +258,6 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float tilt_gain_pitch = gaussianGain(fabs(pitch_deg), 0.0f, magTiltSigmaDeg);
   final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
 
-  // Yaw correction
   float roll_corr, pitch_corr, yaw_corr;
   getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
 
@@ -262,16 +270,13 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   if (delta_yaw_deg < -180.0f) delta_yaw_deg += 360.0f;
   float delta_yaw_rad = delta_yaw_deg * PI / 180.0f;
 
-  // Bias tracking
   if (lastDeltaYawRad * delta_yaw_rad < 0.0f) {
-    gyroBiasZ = 0.0f; // Reset bias on crossing
+    gyroBiasZ = 0.0f;
   }
   lastDeltaYawRad = delta_yaw_rad;
   
-  // Aplikujeme vypočítané DT místo fixního
   gyroBiasZ -= yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
 
-  // Apply correction to quaternion
   float w_x = final_accel_gain * ex * correction_dt;
   float w_y = final_accel_gain * ey * correction_dt;
   float w_z = final_mag_gain * delta_yaw_rad * correction_dt;
@@ -290,7 +295,7 @@ bool AdvancedTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
-  // 1. Aplikace offsetů (Raw data uložení + korekce pro výpočet)
+  // 1. Aplikace offsetů (zde platí to samé: pokud máš offsety v IMU, zde by měly být 0)
   lastAx = ax - accelOffset[0];
   lastAy = ay - accelOffset[1];
   lastAz = az - accelOffset[2];
@@ -301,21 +306,17 @@ bool AdvancedTriFusion::update() {
 
   unsigned long now = micros();
   float dt = (now - lastTime) / 1000000.0f;
-  if (dt <= 0) dt = 0.0000625f; // approx 16kHz default safe
+  if (dt <= 0) dt = 0.0000625f; 
   lastTime = now;
 
-  // 2. Integrace Gyra (vždy běží, ODR 8KHz nebo 1KHz)
   float gx_rad = lastGx * PI / 180.0f;
   float gy_rad = lastGy * PI / 180.0f;
   float gz_rad = (lastGz - gyroBiasZ) * PI / 180.0f; 
   
   gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
 
-  // 3. Magnetometr Check Timer (default 0.5ms)
   if (now - lastMagCheckTime >= magCheckIntervalUs) {
-     lastMagCheckTime = now; // Reset timeru pro kontrolu
-
-     // Dotaz na senzor: Jsou data?
+     lastMagCheckTime = now;
      if (_mag->readData()) {
         float mx_raw = _mag->x - magHardIron[0];
         float my_raw = _mag->y - magHardIron[1];
@@ -325,9 +326,8 @@ bool AdvancedTriFusion::update() {
         lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
         lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
         
-        // Vypočteme skutečný čas od poslední korekce pro bias integraci
         float correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
-        if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f; // Safety clamp
+        if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
 
         complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
         lastSuccessfulCorrectionTime = now;
