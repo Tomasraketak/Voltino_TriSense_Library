@@ -56,7 +56,7 @@ void setup() {
   };
   fusion.setMagSoftIron(softIron);
   
-  fusion.setDeclination(5.0); // Magnetická deklinace (cca 5.0 pro ČR)
+  fusion.setDeclination(6.0); // Magnetická deklinace (cca 5.0 pro ČR)
 
   // =============================================================
   // 3. PARAMETRY FÚZE (LADĚNÍ)
@@ -64,16 +64,16 @@ void setup() {
   
   // Určuje, jak moc věříme akcelerometru vs. gyroskopu
   // Ref 1G, Sigma (šum)
-  fusion.setAccelGaussian(1.0, 0.05);
+  fusion.setAccelGaussian(1.0, 0.02);
   
   // Ref uT, Sigma
-  fusion.setMagGaussian(50.0, 4.0);   
+  fusion.setMagGaussian(48.0, 4.0);   
   
   // Zisk korekcí (0.0 až 1.0) - čím vyšší, tím rychlejší korekce, ale více šumu
-  fusion.setMaxGains(0.1, 0.1);
+  fusion.setMaxGains(0.4, 0.4);
   
   // Integrální složka pro opravu trvalého driftu yaw
-  fusion.setYawKi(0.005); 
+  fusion.setYawKi(0.0075); 
 
   // =============================================================
 
