@@ -43,7 +43,7 @@ private:
   TriSenseMode _mode;
 };
 
-// --- FUSION CLASS (Beze změn, ale čti poznámku níže*) ---
+// --- FUSION CLASS ---
 class TriSenseFusion {
 public: 
   ICM42688P* _imu;
@@ -92,13 +92,16 @@ public:
   virtual bool update() = 0;
   
   // Funkce pro kalibraci a init
-  // POZOR: Pokud použiješ autoCalibrateAccel() přímo na senzoru, 
-  // tato funkce calibrateAccelStatic() už není potřeba (nebo by mohla způsobit dvojí korekci).
   void calibrateAccelStatic(int samples = 1000);
   
   void initOrientation(int samples = 200);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
+  // --- NOVÁ FUNKCE: Globální akcelerace ---
+  // Vypočítá akceleraci v souřadném systému Země (očištěnou o rotaci senzoru)
+  // Osa Z by měla v klidu ukazovat 1.0 G (gravitace)
+  void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
+
   // Setters
   void setAccelGaussian(float ref, float sigma);
   void setMagGaussian(float ref, float sigma, float tiltSigma); 

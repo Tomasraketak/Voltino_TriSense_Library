@@ -123,8 +123,6 @@ void TriSenseFusion::initOrientation(int samples) {
   while(count < samples) {
      float ax, ay, az, gx, gy, gz;
      if(_imu->readFIFO(ax, ay, az, gx, gy, gz) && _mag->readData()) {
-         // Zde aplikujeme FUSION offsety (accelOffset)
-         // Pokud jsi použil autoCalibrateAccel() na IMU, accelOffset by měl být [0,0,0]
          ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
          axSum+=ax; aySum+=ay; azSum+=az;
          
@@ -189,6 +187,35 @@ void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx,
   if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
+// --- NOVÁ FUNKCE IMPLEMENTACE ---
+void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g) {
+  float qw = q[0];
+  float qx = q[1];
+  float qy = q[2];
+  float qz = q[3];
+
+  float x2 = qx + qx; 
+  float y2 = qy + qy; 
+  float z2 = qz + qz;
+  
+  float xx = qx * x2; 
+  float xy = qx * y2; 
+  float xz = qx * z2;
+  
+  float yy = qy * y2; 
+  float yz = qy * z2; 
+  float zz = qz * z2;
+  
+  float wx = qw * x2; 
+  float wy = qw * y2; 
+  float wz = qw * z2;
+
+  // Aplikace rotační matice na vektor lokální akcelerace
+  ax_g = (1.0f - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
+  ay_g = (xy + wz) * lastAx + (1.0f - (xx + zz)) * lastAy + (yz - wx) * lastAz;
+  az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0f - (xx + yy)) * lastAz;
+}
+
 void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
   float qDot1 = 0.5f * (-q[1] * gx - q[2] * gy - q[3] * gz);
   float qDot2 = 0.5f * (q[0] * gx + q[2] * gz - q[3] * gy);
@@ -211,7 +238,7 @@ bool SimpleTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
-  // Aplikace Fusion offsetů (pozor na dvojí odečet, viz komentář v headeru)
+  // Aplikace Fusion offsetů
   ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
   gx -= gyroOffset[0];  gy -= gyroOffset[1];  gz -= gyroOffset[2];
 
@@ -220,7 +247,16 @@ bool SimpleTriFusion::update() {
   if (dt <= 0) dt = 0.000125f; 
   lastTime = now;
 
-  gyroIntegration(gx * PI/180.0f, gy * PI/180.0f, gz * PI/180.0f, dt);
+  float gx_rad = gx * PI/180.0f;
+  float gy_rad = gy * PI/180.0f;
+  float gz_rad = gz * PI/180.0f;
+  
+  gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
+  
+  // Update last values
+  lastAx = ax; lastAy = ay; lastAz = az;
+  lastGx = gx; lastGy = gy; lastGz = gz;
+
   return true;
 }
 
@@ -234,7 +270,10 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
 
   float magStrength = sqrt(mx * mx + my * my + mz * mz);
   recipNorm = 1.0f / magStrength;
-  float mxNorm = mx * recipNorm; 
+  float mxNorm = mx * recipNorm; // (nepoužito v této verzi, ale může se hodit)
+  
+  // Zde by mohla být logika vektorového součinu, v původním kódu je řešeno jinak, 
+  // pro stručnost zachovávám jen výpočet erroru a korekci.
   
   float vx = 2.0f * (q[1] * q[3] - q[0] * q[2]);
   float vy = 2.0f * (q[0] * q[1] + q[2] * q[3]);
