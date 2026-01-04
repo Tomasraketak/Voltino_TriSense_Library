@@ -1,4 +1,3 @@
-```markdown
 # Voltino TriSense Library
 
 ## Overview
@@ -72,7 +71,6 @@ void setup() {
   // Set IMU Output Data Rate (ODR)
   sensor.imu.setODR(ODR_1KHZ); 
 }
-
 ```
 
 ### 2. Reading Raw Data
@@ -100,7 +98,6 @@ void loop() {
       Serial.print("Accel Z: "); Serial.println(az);
   }
 }
-
 ```
 
 ---
@@ -139,7 +136,6 @@ void setup() {
   // Initialize the orientation filter (waits for stable data)
   fusion.initOrientation();
 }
-
 ```
 
 ### 2. The Loop
@@ -161,7 +157,6 @@ void loop() {
     Serial.print(" Yaw: "); Serial.println(yaw);
   }
 }
-
 ```
 
 ---
@@ -228,7 +223,3 @@ Use the example sketch `MotionCal_Bridge.ino`.
 ## License
 
 MIT License. Developed by VoltinoLabs.
-
-```
-
-```
