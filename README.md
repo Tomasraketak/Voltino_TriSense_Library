@@ -1,71 +1,74 @@
 # Voltino TriSense Library
 
-## Description
-The **Voltino TriSense** library is a high-performance Arduino library designed for the **Voltino TriSense Pro** sensor board. It integrates support for the onboard sensors:
-* **BMP580** (High-precision pressure and temperature)
-* **AK09918C** (3-axis Magnetometer)
-* **ICM-42688-P** (6-axis IMU with Accelerometer and Gyroscope)
+## Popis
+**Voltino TriSense** je vysoce výkonná Arduino knihovna navržená pro senzorovou desku **Voltino TriSense Pro**. Integruje podporu pro následující senzory:
+* **BMP580** (Vysoce přesný senzor tlaku a teploty)
+* **AK09918C** (3-osý magnetometr)
+* **ICM-42688-P** (6-osá IMU s akcelerometrem a gyroskopem)
 
-This library allows for easy initialization of all sensors simultaneously in either **I2C mode** or **Hybrid mode** (AK09918C and BMP580 on I2C, ICM42688P on SPI for maximum speed).
+Tato knihovna umožňuje snadnou inicializaci všech senzorů současně, a to buď v režimu **I2C**, nebo v režimu **Hybrid** (AK09918C a BMP580 na I2C, ICM42688P na SPI pro maximální rychlost).
 
-It features a robust **Sensor Fusion** engine (Madgwick/Mahony based Complementary Filter) with dynamic Gaussian gain adjustment, providing stable orientation (Roll, Pitch, Yaw) and Global Acceleration vectors.
+Hlavní předností je robustní engine pro **Senzorovou Fúzi** (Advanced Sensor Fusion), který využívá adaptivní algoritmus (vycházející z principů Madgwick/Mahony filtrů) s dynamickým Gaussovým přizpůsobením zisku. To zajišťuje stabilní orientaci (Roll, Pitch, Yaw) a vektory globálního zrychlení i v náročných podmínkách.
 
-## Key Features
-* **Unified Initialization:** One line of code to set up all sensors.
-* **Hybrid Mode Support:** Runs the IMU on SPI (up to 10MHz) while keeping other sensors on I2C.
-* **Sphere Fit Calibration:** Built-in 6-point accelerometer calibration algorithm.
-* **Advanced Sensor Fusion:**
-    * Quaternion-based orientation estimation.
-    * **Global Acceleration:** Calculates linear acceleration in the Earth frame (removing sensor tilt).
-    * **Dynamic Gains:** Uses Gaussian functions to trust sensors less during dynamic motion or magnetic anomalies.
-    * **Yaw Drift Correction:** Integral term (Ki) to minimize long-term heading drift.
-* **MotionCal Compatibility:** Dedicated example for easy magnetometer calibration using visual tools.
+## Klíčové vlastnosti
+* **Sjednocená inicializace:** Jeden řádek kódu pro nastavení všech senzorů.
+* **Podpora Hybridního režimu:** Provozuje IMU na sběrnici SPI (až 10 MHz), zatímco ostatní senzory zůstávají na I2C.
+* **Kalibrace "Sphere Fit":** Vestavěný algoritmus pro 6-bodovou kalibraci akcelerometru.
+* **Pokročilá Senzorová Fúze:**
+    * Kvaternionový odhad orientace.
+    * **Globální zrychlení:** Výpočet lineárního zrychlení v zemském referenčním rámci (odstranění náklonu senzoru).
+    * **Adaptivní filtrace:** Použití Gaussových funkcí pro snížení důvěry v senzory během dynamického pohybu nebo magnetických anomálií.
+    * **Korekce driftu Yaw:** Integrální složka (Ki) pro minimalizaci dlouhodobého driftu kurzu.
+* **Kompatibilita s MotionCal:** Dedikovaný příklad pro snadnou kalibraci magnetometru pomocí vizuálních nástrojů.
 
-## Installation
-1.  Download the latest release as a ZIP file from the GitHub repository.
-2.  Open the Arduino IDE.
-3.  Go to **Sketch > Include Library > Add .ZIP Library...** and select the downloaded ZIP file.
-4.  The library should now be available in **Sketch > Include Library > Voltino TriSense**.
+## Instalace
+1.  Stáhněte si nejnovější vydání jako ZIP soubor z GitHub repozitáře.
+2.  Otevřete Arduino IDE.
+3.  Přejděte na **Sketch > Include Library > Add .ZIP Library...** a vyberte stažený ZIP soubor.
+4.  Knihovna by nyní měla být dostupná v **Sketch > Include Library > Voltino TriSense**.
 
-## Dependencies
-* `Wire` (Standard Arduino I2C)
-* `SPI` (Standard Arduino SPI)
+## Závislosti
+* `Wire` (Standardní Arduino I2C)
+* `SPI` (Standardní Arduino SPI)
 
-## Usage
+## Použití
 
-### 1. Including the Library
+### 1. Vložení knihovny
+```cpp
 #include <TriSense.h>
-2. Initializing Sensors
-You can initialize all sensors at once using beginAll().
+```
 
-Parameters:
+### 2. Inicializace senzorů
+Všechny senzory můžete inicializovat najednou pomocí funkce `beginAll()`.
 
-mode: MODE_HYBRID (Recommended) or MODE_I2C.
+**Parametry:**
+* `mode`: `MODE_HYBRID` (Doporučeno) nebo `MODE_I2C`.
+* `spiCsPin`: Chip Select pin pro IMU (Výchozí je 17 pro Voltino/Pico).
+* `spiFreq`: Frekvence SPI v Hz (Výchozí 10000000 = 10 MHz).
 
-spiCsPin: Chip Select pin for the IMU (Default is 17 for Voltino/Pico).
-
-spiFreq: SPI Frequency in Hz (Default 10000000 = 10 MHz).
-
-
+```cpp
 TriSense sensor;
 
 void setup() {
   Serial.begin(115200);
 
-  // Initialize in Hybrid Mode:
-  // - AK09918C & BMP580 on I2C
-  // - ICM42688P on SPI (Pin 17, 10 MHz)
+  // Inicializace v Hybridním režimu:
+  // - AK09918C & BMP580 na I2C
+  // - ICM42688P na SPI (Pin 17, 10 MHz)
   if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
-    Serial.println("Failed to initialize sensors!");
+    Serial.println("Chyba inicializace senzorů!");
     while (1);
   }
 
-  // Set ODR (Output Data Rate)
-  sensor.imu.setODR(ODR_4KHZ); // Turbo mode for SPI
+  // Nastavení ODR (Output Data Rate)
+  sensor.imu.setODR(ODR_4KHZ); // Turbo mód pro SPI
 }
-3. Reading Raw Data
-Access individual sensor objects via sensor.bmp, sensor.mag, and sensor.imu.
+```
 
+### 3. Čtení surových dat (Raw Data)
+Přistupujte k jednotlivým objektům senzorů přes `sensor.bmp`, `sensor.mag` a `sensor.imu`.
+
+```cpp
 // BMP580
 float temp = sensor.bmp.readTemperature();
 float press = sensor.bmp.readPressure();
@@ -81,31 +84,49 @@ if (sensor.mag.readData()) {
 // ICM-42688-P
 float ax, ay, az, gx, gy, gz;
 if (sensor.imu.readFIFO(ax, ay, az, gx, gy, gz)) {
-    // Data is available in variables
+    // Data jsou dostupná v proměnných
 }
-Sensor Fusion & Orientation
-The library provides AdvancedTriFusion for high-quality orientation data.
+```
 
-Setup
+## Senzorová Fúze a Orientace (AdvancedTriFusion)
 
+Knihovna poskytuje třídu `AdvancedTriFusion` pro získání vysoce kvalitních dat o orientaci.
+
+### Jak funguje algoritmus Advanced Fusion?
+Algoritmus kombinuje data z gyroskopu (rychlá odezva), akcelerometru (korekce náklonu) a magnetometru (korekce kurzu) do jednoho kvaternionu orientace. Na rozdíl od jednoduchých filtrů používá **Adaptivní Gaussovu Váhu**:
+
+1.  **Predikce (Gyroskop):** Orientace je primárně integrována z gyroskopu. To zajišťuje okamžitou odezvu na pohyb.
+2.  **Korekce (Akcelerometr):** Algoritmus porovnává naměřený vektor gravitace s očekávaným (1.0 G).
+    * *Adaptivní zisk:* Pokud je celkové zrychlení výrazně odlišné od 1 G (např. při vibracích nebo prudkém pohybu), algoritmus sníží vliv akcelerometru na korekci pomocí Gaussovy křivky. Tím se zabrání chybnému náklonu horizontu při pohybu.
+3.  **Korekce (Magnetometr):** Algoritmus porovnává naměřený magnetický sever.
+    * *Magnetická ochrana:* Pokud se velikost magnetického pole liší od kalibrované referenční hodnoty (např. v blízkosti motorů nebo kovů), vliv magnetometru je dočasně potlačen.
+    * *Tilt Compensation:* Zisk magnetometru je také dynamicky upravován podle náklonu (Pitch/Roll), aby se předešlo chybám v Yaw při strmých úhlech.
+4.  **Gyro Bias Learning (Ki):** Algoritmus obsahuje integrální složku, která se "učí" drift gyroskopu v ose Z (Yaw) a automaticky jej kompenzuje.
+
+### Nastavení Fúze
+
+```cpp
 AdvancedTriFusion fusion(&sensor.imu, &sensor.mag);
 
 void setup() {
-    // ... init sensors ...
+    // ... init senzorů ...
 
-    // Set Calibration Data (See Calibration section)
+    // Nastavení kalibračních dat (Viz sekce Kalibrace)
     sensor.imu.setAccelOffset(0.01, -0.02, 0.05);
     sensor.imu.setAccelScale(1.00, 1.00, 1.00);
     fusion.setMagHardIron(-40.0, 12.5, 5.0);
     
-    // Set Magnetic Declination (e.g., 5.6 degrees for Central Europe)
+    // Nastavení magnetické deklinace (např. 5.6 stupňů pro ČR)
     fusion.setDeclination(5.6);
 
-    // Initialize Orientation
+    // Inicializace orientace (chvíli počká na ustálení)
     fusion.initOrientation();
 }
-Loop
+```
 
+### Hlavní smyčka
+
+```cpp
 void loop() {
     if (fusion.update()) {
         float roll, pitch, yaw;
@@ -116,57 +137,44 @@ void loop() {
         Serial.print(" Yaw: "); Serial.println(yaw);
     }
 }
-Global Acceleration
-Calculate acceleration relative to the Earth (removing gravity and sensor tilt).
+```
 
-Stationary: Z ≈ 1.0 G, X/Y ≈ 0.0 G.
+## Globální Zrychlení (Global Acceleration)
+Tato funkce vypočítá zrychlení relativně k Zemi (odstraní gravitaci a náklon senzoru).
+* **Stacionární stav:** Z ≈ 1.0 G, X/Y ≈ 0.0 G (nebo 0 ve všech osách po odečtení 1G).
+* **Lineární pohyb:** Ukazuje čisté zrychlení pohybu bez ohledu na to, jak je senzor natočen.
 
-Linear Motion: Shows pure movement acceleration.
-
-
+```cpp
 float ax_g, ay_g, az_g;
 fusion.getGlobalAcceleration(ax_g, ay_g, az_g);
-Calibration
-To get accurate data, you must calibrate the sensors. The library includes tools to make this easy.
+```
 
-1. Gyroscope & Accelerometer
-Use the example: TriSense_Calibration.ino
+## Kalibrace
+Pro získání přesných dat je nutné senzory kalibrovat. Knihovna obsahuje nástroje, které tento proces usnadňují.
 
-Upload the sketch.
+### 1. Gyroskop a Akcelerometr
+Použijte příklad: `TriSense_Calibration.ino`
+1.  Nahrajte sketch.
+2.  Otevřete Serial Monitor.
+3.  Odešlete `'g'` pro automatickou kalibraci driftu gyroskopu (senzor musí být v klidu).
+4.  Odešlete `'a'` pro spuštění 6-bodové kalibrace akcelerometru. Postupujte podle pokynů na obrazovce a otáčejte senzorem do požadovaných poloh. Algoritmus "Sphere Fit" vypočítá přesný Offset a Scale.
+5.  Zkopírujte vygenerovaný kód do `setup()` vašeho projektu.
 
-Open Serial Monitor.
+### 2. Magnetometr
+Použijte příklad: `MotionCal_Bridge.ino`
+1.  Nahrajte sketch.
+2.  Stáhněte si nástroj **MotionCal** (od Paula Stoffregena).
+3.  Spusťte MotionCal a připojte se k sériovému portu.
+4.  Otáčejte senzorem ve všech směrech, dokud se sféra v programu nezaplní body.
+5.  MotionCal vypočítá hodnoty **Hard Iron** a **Soft Iron**.
+6.  Zkopírujte tyto hodnoty do funkcí `fusion.setMagHardIron(...)` a `fusion.setMagSoftIron(...)`.
 
-Send 'g' to auto-calibrate Gyro bias (keep sensor still).
+## Přiložené příklady
+* **SimpleFusion:** Základní nastavení fúze.
+* **AdvancedFusion_Improved:** Kompletní implementace s placeholdery pro kalibraci a "best practices".
+* **AdvancedFusion_GlobalAccel:** Ukázka získání zrychlení v zemském rámci.
+* **TriSense_Calibration:** Nástroj pro kalibraci Gyra a Akcelerometru.
+* **MotionCal_Bridge:** Nástroj pro odesílání surových dat do aplikace MotionCal.
 
-Send 'a' to start the 6-point Accelerometer Calibration. Follow the on-screen instructions to rotate the sensor. It uses a "Sphere Fit" algorithm to calculate precise Offset and Scale.
-
-Copy the generated code into your project's setup().
-
-2. Magnetometer
-Use the example: MotionCal_Bridge.ino
-
-Upload the sketch.
-
-Download the MotionCal tool (by Paul Stoffregen).
-
-Run MotionCal and connect to the Serial port.
-
-Rotate the sensor in all directions until the sphere is complete.
-
-MotionCal will give you Hard Iron and Soft Iron values.
-
-Copy these values into fusion.setMagHardIron(...) and fusion.setMagSoftIron(...).
-
-Examples included
-SimpleFusion: Basic fusion setup.
-
-AdvancedFusion_Improved: Complete implementation with calibration placeholders and best practices.
-
-AdvancedFusion_GlobalAccel: Demonstrates how to get Earth-frame acceleration.
-
-TriSense_Calibration: Tool for calibrating Gyro and Accel.
-
-MotionCal_Bridge: Tool for sending raw data to MotionCal application.
-
-License
-This library is released under the MIT License. Developed by VoltinoLabs (Tomas Michal).
+## Licence
+Tato knihovna je uvolněna pod licencí **MIT License**. Vyvinuto **VoltinoLabs** (Tomas Michal).
