@@ -1,13 +1,13 @@
 /*
- * Příklad: TriSense_Calibration.ino
- * Tento nástroj slouží ke kalibraci senzorů na desce Voltino TriSense.
- * * INSTRUKCE:
- * 1. Otevřete Serial Monitor (115200 baud).
- * 2. Odesílejte příkazy:
- * 'g' -> Automatická kalibrace gyroskopu (Senzor musí být v klidu!)
- * 'a' -> 6-bodová kalibrace akcelerometru (Postupujte podle pokynů v terminálu)
- * 'x' -> Reset všech HW offsetů (tovární nastavení biasu v čipu)
- * * 3. Získané hodnoty (kód) zkopírujte do funkce setup() ve vašem projektu.
+ * Example: TriSense_Calibration.ino
+ * This tool is used for calibrating sensors on the Voltino TriSense board.
+ * * INSTRUCTIONS:
+ * 1. Open Serial Monitor (115200 baud).
+ * 2. Send commands:
+ * 'g' -> Automatic Gyro Calibration (Sensor must be still!)
+ * 'a' -> 6-Point Accelerometer Calibration (Follow instructions in terminal)
+ * 'x' -> Reset all HW offsets (Factory chip bias)
+ * * 3. Copy the obtained values (code) into the setup() function of your project.
  */
 
 #include <TriSense.h>
@@ -19,23 +19,26 @@ void setup() {
   while (!Serial);
   delay(500);
 
-  Serial.println("Inicializuji TriSense...");
+  Serial.println("Initializing TriSense...");
 
-  // Inicializace v hybridním módu (nejčastější použití)
-  // Pokud používáš I2C mód, změň na: sensor.beginAll(MODE_I2C);
-  if (!sensor.beginAll(MODE_HYBRID, 17)) {
-    Serial.println("Chyba inicializace! Zkontrolujte zapojení.");
+  // Initialization in Hybrid mode (most common use)
+  // 3rd parameter sets the SPI frequency (e.g., 10000000 = 10 MHz for RP2040/ESP32)
+  // NOTE: Standard Arduino (AVR like Uno/Nano) handles max 4MHz (4000000)!
+  // If using I2C mode, change to: sensor.beginAll(MODE_I2C);
+  if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
+    Serial.println("Initialization failed! Check wiring.");
     while (1);
   }
-    IMU.setODR(ODR_500HZ); 
-
+  
+  // Set Output Data Rate for calibration
+  sensor.imu.setODR(ODR_500HZ); 
 
   Serial.println("--------------------------------------");
-  Serial.println("TriSense Kalibracni Nastroj");
+  Serial.println("TriSense Calibration Tool");
   Serial.println("--------------------------------------");
-  Serial.println("[g] -> Kalibrovat GYRO (Nehybat!)");
-  Serial.println("[a] -> Kalibrovat AKCELEROMETR (6 poloh)");
-  Serial.println("[x] -> RESET offsetu v cipu");
+  Serial.println("[g] -> Calibrate GYRO (Keep still!)");
+  Serial.println("[a] -> Calibrate ACCELEROMETER (6 positions)");
+  Serial.println("[x] -> RESET chip offsets");
   Serial.println("--------------------------------------");
 }
 
@@ -43,22 +46,22 @@ void loop() {
   if (Serial.available()) {
     char c = Serial.read();
     
-    // --- KALIBRACE GYRA ---
+    // --- GYRO CALIBRATION ---
     if (c == 'g') {
-      // Zavolá wrapper v TriSense, který spustí logiku v ICM42688P
+      // Calls wrapper in TriSense which triggers logic in ICM42688P
       sensor.autoCalibrateGyro(1000); 
     } 
     
-    // --- KALIBRACE AKCELEROMETRU ---
+    // --- ACCELEROMETER CALIBRATION ---
     else if (c == 'a') {
-      // Spustí interaktivního průvodce (vyžaduje potvrzování 'y' pro každou polohu)
+      // Starts interactive wizard (requires 'y' confirmation for each position)
       sensor.autoCalibrateAccel();
     }
     
-    // --- RESET OFFSETŮ ---
+    // --- RESET OFFSETS ---
     else if (c == 'x') {
       sensor.resetHardwareOffsets();
-      Serial.println("Hardwarove registry vymazany (Offset = 0).");
+      Serial.println("Hardware registers cleared (Offset = 0).");
     }
   }
 }

@@ -1,5 +1,7 @@
-// Example: SimpleFusion.ino
-// Demonstrace jednoduché fúze senzorů s využitím nové kalibrace.
+/*
+ * Example: SimpleFusion.ino
+ * Demonstration of simple sensor fusion using the new calibration system.
+ */
 
 #include <TriSense.h>
 
@@ -7,50 +9,66 @@ TriSense sensor;
 SimpleTriFusion fusion(&sensor.imu, &sensor.mag);
 
 unsigned long lastPrint = 0;
-const unsigned long printInterval = 50000; // 20Hz (us)
+const unsigned long printInterval = 50000; // 20Hz output (50000 us)
 
 void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // 1. Inicializace senzorů
-  if (!sensor.beginAll(MODE_HYBRID, 17)) {
+  // 1. Sensor Initialization
+  
+  // OPTION A: Hybrid Mode (Recommended for better results)
+  // AK09918C + BMP580 on I2C, ICM-42688-P on SPI (CS pin 17, 10MHz)
+  if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
+  
+  // OPTION B: I2C Only Mode
+  // If you want to run everything on I2C (slower, but fewer wires), uncomment below:
+  // if (!sensor.beginAll(MODE_I2C)) {
+  
     Serial.println("Failed to initialize sensors!");
     while (1);
   }
-    IMU.setODR(ODR_4KHZ); 
 
+  // Set ODR for IMU
+  sensor.imu.setODR(ODR_4KHZ); 
 
   // =============================================================
-  // 2. KALIBRACE (Sem vložte hodnoty z TriSense_Calibration.ino)
+  // 2. CALIBRATION (Insert values from TriSense_Calibration.ino)
   // =============================================================
   
-  // A) Akcelerometr (Bias + Scale)
-  // Příklad:
-  // sensor.imu.setAccelOffset(0.012, -0.005, 0.001);
-  // sensor.imu.setAccelScale(1.001, 0.999, 1.002);
+  // A) Accelerometer (Bias + Scale)
+  // Run TriSense_Calibration.ino, press 'a', and copy the code output here.
+  // If values are 0/1, it means no calibration is applied.
+  sensor.imu.setAccelOffset(0.00, 0.00, 0.00);
+  sensor.imu.setAccelScale(1.00, 1.00, 1.00);
 
-  // B) Gyroskop
-  // Můžete buď nastavit pevné hodnoty z minula:
+  // B) Gyroscope
+  // You can set fixed offset values if known:
   // sensor.imu.setGyroOffset(0.52, -0.12, 0.05);
   
-  // ... NEBO provést rychlou kalibraci při každém startu (doporučeno):
+  // ... OR perform fast calibration on every startup (Recommended):
+  // Sensor must be stationary during this phase!
   Serial.println("Calibrating Gyro... Keep still!");
   sensor.autoCalibrateGyro(500); 
 
-  // C) Magnetometr (Hard/Soft Iron) - stále se nastavuje do fusion objektu
+  // C) Magnetometer (Hard/Soft Iron)
+  // Run MotionCal or similar tool to get these values.
   fusion.setMagHardIron(-46.02, -0.85, -46.00);
+  
   float softIron[3][3] = {
     {0.965, 0.008, -0.002},
     {0.008, 0.981, 0.139},
     {-0.002, 0.139, 1.077}
   };
   fusion.setMagSoftIron(softIron);
-  fusion.setDeclination(5.0 + 1.0 / 60.0); // Změňte dle vaší lokality
+  
+  // Magnetic Declination (Change according to your location)
+  // Example for Prague/Central Europe (~5.6 degrees)
+  fusion.setDeclination(5.6); 
 
   // =============================================================
 
-  // Inicializace orientace
+  // Initialize orientation algorithm
   Serial.println("Initializing orientation...");
   fusion.initOrientation();
   Serial.println("Ready.");
