@@ -2,19 +2,22 @@
 
 ICM42688P::ICM42688P()
 : _bus(BUS_I2C), _csPin(17), 
-  _spiSettings(10000000, MSBFIRST, SPI_MODE3), // 10 MHz SPI
-  _odr(ODR_500HZ), // Default (přepíše se v begin)
+  _spiSettings(10000000, MSBFIRST, SPI_MODE3), // Default 10 MHz
+  _odr(ODR_500HZ), // Default (overwritten in begin)
   _gOX(0), _gOY(0), _gOZ(0),
   _aOX(0), _aOY(0), _aOZ(0),
   _aSx(1.0f), _aSy(1.0f), _aSz(1.0f) {}
 
-bool ICM42688P::begin(ICM_BUS busType, uint8_t csPin) {
+// UPDATED: Implementation accepts spiFreq
+bool ICM42688P::begin(ICM_BUS busType, uint8_t csPin, uint32_t spiFreq) {
   _bus = busType;
   _csPin = csPin;
 
-  // Automatické nastavení ODR podle typu sběrnice
+  // Automatic ODR configuration based on bus type
   if (_bus == BUS_SPI) {
     _odr = ODR_4KHZ; // SPI = 4 kHz
+    // Update SPI settings with user frequency
+    _spiSettings = SPISettings(spiFreq, MSBFIRST, SPI_MODE3);
   } else {
     _odr = ODR_500HZ; // I2C = 500 Hz
   }
@@ -25,6 +28,7 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t csPin) {
     pinMode(_csPin, OUTPUT);
     digitalWrite(_csPin, HIGH);
     SPI.begin();
+    // Toggle CS to wake up SPI interface
     for (int i = 0; i < 3; i++) {
       digitalWrite(_csPin, LOW); delay(1); digitalWrite(_csPin, HIGH); delay(1);
     }
@@ -40,9 +44,9 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t csPin) {
   uint8_t intConfig1 = readReg(0x64);
   writeReg(0x64, intConfig1 & ~(1 << 4));
 
-  writeReg(0x4E, 0x0F); // LN mode
+  writeReg(0x4E, 0x0F); // LN mode (Low Noise)
   
-  // Zápis ODR
+  // Write ODR settings
   writeReg(0x4F, (0 << 5) | (uint8_t)_odr); 
   writeReg(0x50, (0 << 5) | (uint8_t)_odr); 
 
@@ -63,7 +67,7 @@ void ICM42688P::setBank(uint8_t bank) {
   writeReg(REG_BANK_SEL, bank);
 }
 
-// --- ČTENÍ FIFO ---
+// --- READ FIFO ---
 bool ICM42688P::readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   uint16_t fifoCount = ((uint16_t)readReg(0x2E) << 8) | readReg(0x2F);
   if (fifoCount < 20) return false;
@@ -72,10 +76,12 @@ bool ICM42688P::readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, 
   readRegs(0x30, packet, 20);
 
   uint8_t header = packet[0];
+  // Check if header is valid (MSG bit empty and Accel/Gyro valid)
   if ((header & 0x80) || !(header & 0x10)) return false; 
 
+  // Parse 20-bit data (High Byte, Middle Byte, Low Nibble)
   int32_t ax_r = (int32_t)((int8_t)packet[1] << 12 | packet[2] << 4 | (packet[17] >> 4));
-  ax_r = (ax_r << 12) >> 12; 
+  ax_r = (ax_r << 12) >> 12; // Sign extension
   ax_r >>= 2; 
 
   int32_t ay_r = (int32_t)((int8_t)packet[3] << 12 | packet[4] << 4 | (packet[18] >> 4));
@@ -98,7 +104,7 @@ bool ICM42688P::readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, 
   gz_r = (gz_r << 12) >> 12; 
   gz_r >>= 1;
 
-  // SW Kalibrace
+  // SW Calibration application
   float raw_ax = (ax_r / 8192.0f) - _aOX;
   float raw_ay = (ay_r / 8192.0f) - _aOY;
   float raw_az = (az_r / 8192.0f) - _aOZ;
@@ -133,7 +139,7 @@ void ICM42688P::getGyroSoftwareOffset(float &ox, float &oy, float &oz) { ox = _g
 void ICM42688P::getAccelSoftwareOffset(float &ox, float &oy, float &oz) { ox = _aOX; oy = _aOY; oz = _aOZ; }
 void ICM42688P::getAccelSoftwareScale(float &sx, float &sy, float &sz) { sx = _aSx; sy = _aSy; sz = _aSz; }
 
-// --- Wrappers (Kompatibilita) ---
+// --- Wrappers (Compatibility) ---
 void ICM42688P::setGyroOffset(float ox, float oy, float oz) { setGyroSoftwareOffset(ox, oy, oz); }
 void ICM42688P::setAccelOffset(float ox, float oy, float oz) { setAccelSoftwareOffset(ox, oy, oz); }
 void ICM42688P::setAccelScale(float sx, float sy, float sz) { setAccelSoftwareScale(sx, sy, sz); }
@@ -142,7 +148,7 @@ void ICM42688P::getGyroOffset(float &ox, float &oy, float &oz) { getGyroSoftware
 void ICM42688P::getAccelOffset(float &ox, float &oy, float &oz) { getAccelSoftwareOffset(ox, oy, oz); }
 void ICM42688P::getAccelScale(float &sx, float &sy, float &sz) { getAccelSoftwareScale(sx, sy, sz); }
 
-// --- KALIBRACE ---
+// --- CALIBRATION ---
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   Serial.println("GYRO CALIBRATION (SW)... Keep still.");
   _gOX = 0; _gOY = 0; _gOZ = 0; 
@@ -204,6 +210,8 @@ void ICM42688P::autoCalibrateAccel() {
   }
 
   Serial.println(F("\nCalculating Sphere Fit..."));
+  // Uses Gradient Descent to find center (bias) and radii (scale) 
+  // that best fit the measurements to a unit sphere (1G)
   
   float bx = 0, by = 0, bz = 0;
   float sx = 1, sy = 1, sz = 1;

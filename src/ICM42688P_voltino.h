@@ -30,38 +30,41 @@ enum ICM_ODR {
 class ICM42688P {
 public:
   ICM42688P();
-  bool begin(ICM_BUS busType, uint8_t csPin = 17);
+  
+  // UPDATED: Added spiFreq parameter with default 10MHz
+  bool begin(ICM_BUS busType, uint8_t csPin = 17, uint32_t spiFreq = 10000000);
+  
   void setODR(ICM_ODR odr);
   
-  // Čtení dat (automaticky aplikuje SW kalibraci)
+  // Read data (automatically applies SW calibration)
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
-  // --- Kalibrace a Nastavení ---
+  // --- Calibration and Settings ---
   
-  // Funkce pro smazání chyb v čipu (ZAVOLEJ JEDNOU V SETUPU)
+  // Function to clear chip errors/offsets (CALL ONCE IN SETUP)
   void resetHardwareOffsets();
 
-  // Manuální nastavení offsetů (pokud je znáš z minula)
+  // Manual offset setting (if known from previous calibration)
   void setGyroSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareScale(float sx, float sy, float sz);
 
-  // Získání aktuálních offsetů (pro uložení/výpis)
+  // Get current offsets (for saving/printing)
   void getGyroSoftwareOffset(float &ox, float &oy, float &oz);
   void getAccelSoftwareOffset(float &ox, float &oy, float &oz);
   void getAccelSoftwareScale(float &sx, float &sy, float &sz);
 
-  // Wrappery pro kompatibilitu
+  // Compatibility wrappers
   void setGyroOffset(float ox, float oy, float oz);
   void setAccelOffset(float ox, float oy, float oz);
-  void setAccelScale(float sx, float sy, float sz); // Wrapper pro Scale
+  void setAccelScale(float sx, float sy, float sz); // Wrapper for Scale
   
   void getGyroOffset(float &ox, float &oy, float &oz);
   void getAccelOffset(float &ox, float &oy, float &oz);
-  void getAccelScale(float &sx, float &sy, float &sz); // Wrapper pro Scale
+  void getAccelScale(float &sx, float &sy, float &sz); // Wrapper for Scale
 
-  // Automatická kalibrace (vypočítá a uloží do SW proměnných)
-  void autoCalibrateGyro(uint16_t samples = 750);
+  // Automatic calibration (calculates and stores in SW variables)
+  void autoCalibrateGyro(uint16_t samples = 1000);
   void autoCalibrateAccel(); 
 
 private:
@@ -70,7 +73,7 @@ private:
   SPISettings _spiSettings;
   ICM_ODR _odr;
 
-  // Kalibrační hodnoty (Software)
+  // Calibration values (Software)
   float _gOX, _gOY, _gOZ;
   float _aOX, _aOY, _aOZ;
   float _aSx, _aSy, _aSz;

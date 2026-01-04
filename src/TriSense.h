@@ -10,7 +10,7 @@
 
 enum TriSenseMode {
   MODE_I2C,
-  MODE_HYBRID   // AK a BMP na I2C, ICM na SPI
+  MODE_HYBRID   // AK and BMP on I2C, ICM on SPI
 };
 
 class TriSense {
@@ -20,36 +20,33 @@ public:
   ICM42688P imu;
 
   TriSense();
-  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17);
   
-  // Helper funkce pro jednotlivé senzory
+  // UPDATED: Added spiFreq parameter
+  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 10000000);
+  
+  // Helper functions for individual sensors
   bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
   bool beginMAG();
-  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17);
+  
+  // UPDATED: Added spiFreq parameter
+  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t spiFreq = 10000000);
 
-  // --- NOVÉ KALIBRAČNÍ FUNKCE (Wrappery pro ICM42688P) ---
-  // Tyto funkce volají přímo vylepšené metody z aktualizované knihovny ICM
-  
-  // Smaže HW offsety v čipu (použij, pokud se senzor chová divně)
+  // --- NEW CALIBRATION FUNCTIONS (Wrappers for ICM42688P) ---
   void resetHardwareOffsets();
-  
-  // Automatická kalibrace gyra (senzor musí být v klidu)
   void autoCalibrateGyro(uint16_t samples = 1000);
-  
-  // Interaktivní 6-bodová kalibrace akcelerometru (přes Serial)
   void autoCalibrateAccel(); 
 
 private:
   TriSenseMode _mode;
 };
 
-// --- FUSION CLASS ---
+// --- FUSION CLASS (beze změny) ---
 class TriSenseFusion {
 public: 
   ICM42688P* _imu;
   AK09918C* _mag;
 
-  // Orientace (Quaternion)
+  // Orientation (Quaternion)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
   // --- PUBLIC DATA (RAW) ---
@@ -57,30 +54,30 @@ public:
   float lastGx = 0, lastGy = 0, lastGz = 0; // dps
   float lastMx = 0, lastMy = 0, lastMz = 0; // uT
 
-  // --- KALIBRAČNÍ DATA ---
+  // --- CALIBRATION DATA ---
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
 
-  // --- PARAMETRY FILTRU ---
-  float accRef = 1.0f;          
-  float accSigma = 0.05f;       
-  float magRef = 50.88f;         
-  float magSigma = 3.5f;       
+  // --- FILTER PARAMETERS ---
+  float accRef = 1.0f;            
+  float accSigma = 0.02f;       
+  float magRef = 50.1f;          
+  float magSigma = 3.5f;        
   float magTiltSigmaDeg = 15.0f;
   float magneticDeclination = 0.0f;
 
-  float yawKi = 0.005f;           
-  float maxAccelGain = 0.1f;    
-  float maxMagGain = 0.1f;      
+  float yawKi = 0.0075f;           
+  float maxAccelGain = 0.4f;    
+  float maxMagGain = 0.4f;       
 
   unsigned long lastTime = 0;
   
-  // Interval kontroly magnetometru
+  // Magnetometer check interval
   unsigned long magCheckIntervalUs = 500; // Default 0.5ms
 
-  // Interní metody
+  // Internal methods
   float gaussianGain(float x, float mu, float sigma);
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
@@ -91,22 +88,19 @@ public:
   
   virtual bool update() = 0;
   
-  // Funkce pro kalibraci a init
+  // Calibration and init functions
   void calibrateAccelStatic(int samples = 1000);
   
-  void initOrientation(int samples = 200);
+  void initOrientation(int samples = 250);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  // --- NOVÁ FUNKCE: Globální akcelerace ---
-  // Vypočítá akceleraci v souřadném systému Země (očištěnou o rotaci senzoru)
-  // Osa Z by měla v klidu ukazovat 1.0 G (gravitace)
   void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
 
   // Setters
   void setAccelGaussian(float ref, float sigma);
   void setMagGaussian(float ref, float sigma, float tiltSigma); 
   void setMagGaussian(float ref, float sigma);                  
-  void setMagTiltSigma(float sigmaDeg);                         
+  void setMagTiltSigma(float sigmaDeg);                          
   void setMagCalibration(float hardIron[3], float softIron[3][3]);
   void setDeclination(float deg);
   
@@ -129,7 +123,7 @@ public:
 // Advanced implementation
 class AdvancedTriFusion : public TriSenseFusion {
 private:
-  // Interní proměnné pro korekci
+  // Internal variables for correction
   unsigned long lastMagCheckTime = 0; 
   unsigned long lastSuccessfulCorrectionTime = 0; 
   

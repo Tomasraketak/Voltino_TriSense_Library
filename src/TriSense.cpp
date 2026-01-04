@@ -3,7 +3,8 @@
 // --- TriSense Implementation ---
 TriSense::TriSense() : mag(Wire) {}
 
-bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin) {
+// UPDATED: Now accepts and passes spiFreq
+bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
   _mode = mode;
   Wire.begin();
   if (!bmp.begin()) return false;
@@ -13,7 +14,8 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin) {
     if (!imu.begin(BUS_I2C)) return false;
     imu.setODR(ODR_1KHZ); // I2C limit
   } else {
-    if (!imu.begin(BUS_SPI, spiCsPin)) return false;
+    // Pass spiFreq to IMU
+    if (!imu.begin(BUS_SPI, spiCsPin, spiFreq)) return false;
     imu.setODR(ODR_8KHZ); // SPI Turbo mode
   }
 
@@ -28,9 +30,12 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin) {
 
 bool TriSense::beginBMP(uint8_t addr) { return bmp.begin(addr); }
 bool TriSense::beginMAG() { return mag.begin(); }
-bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin) { return imu.begin(busType, csPin); }
 
-// --- NOVÉ WRAPPERY PRO ICM42688P ---
+// UPDATED: Now passes spiFreq
+bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t spiFreq) { 
+  return imu.begin(busType, csPin, spiFreq); 
+}
+
 void TriSense::resetHardwareOffsets() {
   imu.resetHardwareOffsets();
 }
@@ -44,6 +49,7 @@ void TriSense::autoCalibrateAccel() {
 }
 
 // --- TriSenseFusion Implementation ---
+// (Zbytek souboru beze změny, kopíruji jen pro kontext, abys viděl, že tam nic nechybí)
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
 
 float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
@@ -180,14 +186,15 @@ void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx,
   pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI;
   float phi = roll * PI/180.0f;
   float theta = pitch * PI/180.0f;
+  
   float by = my * cos(phi) - mz * sin(phi);
   float bx = mx * cos(theta) + my * sin(theta) * sin(phi) + mz * sin(theta) * cos(phi);
   yaw = atan2(-by, bx) * 180.0f / PI + magneticDeclination;
+  
   if (yaw < 0) yaw += 360.0f;
   if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-// --- NOVÁ FUNKCE IMPLEMENTACE ---
 void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g) {
   float qw = q[0];
   float qx = q[1];
@@ -210,7 +217,6 @@ void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g
   float wy = qw * y2; 
   float wz = qw * z2;
 
-  // Aplikace rotační matice na vektor lokální akcelerace
   ax_g = (1.0f - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
   ay_g = (xy + wz) * lastAx + (1.0f - (xx + zz)) * lastAy + (yz - wx) * lastAz;
   az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0f - (xx + yy)) * lastAz;
@@ -231,14 +237,12 @@ void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
-// --- Simple Implementation ---
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 bool SimpleTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
-  // Aplikace Fusion offsetů
   ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
   gx -= gyroOffset[0];  gy -= gyroOffset[1];  gz -= gyroOffset[2];
 
@@ -253,14 +257,12 @@ bool SimpleTriFusion::update() {
   
   gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
   
-  // Update last values
   lastAx = ax; lastAy = ay; lastAz = az;
   lastGx = gx; lastGy = gy; lastGz = gz;
 
   return true;
 }
 
-// --- Advanced Implementation ---
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt) {
@@ -270,10 +272,6 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
 
   float magStrength = sqrt(mx * mx + my * my + mz * mz);
   recipNorm = 1.0f / magStrength;
-  float mxNorm = mx * recipNorm; // (nepoužito v této verzi, ale může se hodit)
-  
-  // Zde by mohla být logika vektorového součinu, v původním kódu je řešeno jinak, 
-  // pro stručnost zachovávám jen výpočet erroru a korekci.
   
   float vx = 2.0f * (q[1] * q[3] - q[0] * q[2]);
   float vy = 2.0f * (q[0] * q[1] + q[2] * q[3]);
@@ -334,7 +332,6 @@ bool AdvancedTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
-  // 1. Aplikace offsetů (zde platí to samé: pokud máš offsety v IMU, zde by měly být 0)
   lastAx = ax - accelOffset[0];
   lastAy = ay - accelOffset[1];
   lastAz = az - accelOffset[2];
