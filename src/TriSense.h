@@ -4,9 +4,15 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <cmath> // Pro matematické funkce
 #include "BMP580.h"
 #include "AK09918C.h"
 #include "ICM42688P_voltino.h"
+
+// Konstanty pro rychlé převody
+constexpr float DEG_TO_RAD_F = 3.1415926535f / 180.0f;
+constexpr float RAD_TO_DEG_F = 180.0f / 3.1415926535f;
+constexpr float PI_F = 3.1415926535f;
 
 enum TriSenseMode {
   MODE_I2C,
@@ -21,17 +27,13 @@ public:
 
   TriSense();
   
-  // UPDATED: Added spiFreq parameter
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 10000000);
   
-  // Helper functions for individual sensors
   bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
   bool beginMAG();
   
-  // UPDATED: Added spiFreq parameter
   bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t spiFreq = 10000000);
 
-  // --- NEW CALIBRATION FUNCTIONS (Wrappers for ICM42688P) ---
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = 1000);
   void autoCalibrateAccel(); 
@@ -40,7 +42,7 @@ private:
   TriSenseMode _mode;
 };
 
-// --- FUSION CLASS (beze změny) ---
+// --- FUSION CLASS ---
 class TriSenseFusion {
 public: 
   ICM42688P* _imu;
@@ -50,15 +52,15 @@ public:
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
   // --- PUBLIC DATA (RAW) ---
-  float lastAx = 0, lastAy = 0, lastAz = 0; // G
-  float lastGx = 0, lastGy = 0, lastGz = 0; // dps
-  float lastMx = 0, lastMy = 0, lastMz = 0; // uT
+  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G
+  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; // dps
+  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; // uT
 
   // --- CALIBRATION DATA ---
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
-  float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
+  float magSoftIron[3][3] = {{1.0f,0.0f,0.0f},{0.0f,1.0f,0.0f},{0.0f,0.0f,1.0f}}; 
 
   // --- FILTER PARAMETERS ---
   float accRef = 1.0f;            
@@ -75,10 +77,19 @@ public:
   unsigned long lastTime = 0;
   
   // Magnetometer check interval
-  unsigned long magCheckIntervalUs = 500; // Default 0.5ms
+  unsigned long magCheckIntervalUs = 500; 
+
+protected:
+  // OPTIMALIZACE: Předpočítané koeficienty pro Gaussian funkce
+  // Ukládáme 1.0 / (2 * sigma * sigma) pro rychlé násobení
+  float _accGaussCoeff = 0.0f;
+  float _magGaussCoeff = 0.0f;
+  float _tiltGaussCoeff = 0.0f;
 
   // Internal methods
-  float gaussianGain(float x, float mu, float sigma);
+  float gaussianGainOptimized(float diffSq, float coeff); // Nová optimalizovaná verze
+  float gaussianGain(float x, float mu, float sigma); // Původní (wrapper)
+  
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
@@ -88,7 +99,6 @@ public:
   
   virtual bool update() = 0;
   
-  // Calibration and init functions
   void calibrateAccelStatic(int samples = 1000);
   
   void initOrientation(int samples = 250);
@@ -123,7 +133,6 @@ public:
 // Advanced implementation
 class AdvancedTriFusion : public TriSenseFusion {
 private:
-  // Internal variables for correction
   unsigned long lastMagCheckTime = 0; 
   unsigned long lastSuccessfulCorrectionTime = 0; 
   
