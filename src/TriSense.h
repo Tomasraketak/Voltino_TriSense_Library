@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <cmath> 
+#include <cmath> // Pro matematické funkce
 #include "BMP580.h"
 #include "AK09918C.h"
 #include "ICM42688P_voltino.h"
@@ -51,17 +51,10 @@ public:
   // Orientation (Quaternion)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
-  // --- INTERNAL RAW DATA (Body Frame, G, dps, uT) ---
-  // Toto jsou data přímo ze senzoru po odečtení offsetů, ale PŘED downsamplingem/rotací
-  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; 
-  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; 
-  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; 
-
-  // --- PUBLIC PROCESSED OUTPUT ---
-  // Toto jsou finální data pro uživatele (Global/Body, m/s2 nebo G, Downsampled)
-  float ax = 0.0f, ay = 0.0f, az = 0.0f;
-  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-  float mx = 0.0f, my = 0.0f, mz = 0.0f;
+  // --- PUBLIC DATA (RAW) ---
+  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G
+  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; // dps
+  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; // uT
 
   // --- CALIBRATION DATA ---
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
@@ -82,36 +75,24 @@ public:
   float maxMagGain = 0.4f;       
 
   unsigned long lastTime = 0;
+  
+  // Magnetometer check interval
   unsigned long magCheckIntervalUs = 500; 
 
 protected:
-  // OPTIMALIZACE: Předpočítané koeficienty
+  // OPTIMALIZACE: Předpočítané koeficienty pro Gaussian funkce
+  // Ukládáme 1.0 / (2 * sigma * sigma) pro rychlé násobení
   float _accGaussCoeff = 0.0f;
   float _magGaussCoeff = 0.0f;
   float _tiltGaussCoeff = 0.0f;
 
-  // --- NEW CONFIGURATION VARIABLES ---
-  bool _useGUnits;
-  float _gravityConstant;
-  bool _globalAccelEnabled;
-  int _downsampleFactor;
-  int _sampleCounter;
-
-  // Accumulators for downsampling
-  float _sumAx, _sumAy, _sumAz;
-  float _sumGx, _sumGy, _sumGz;
-  float _sumMx, _sumMy, _sumMz;
-
   // Internal methods
-  float gaussianGainOptimized(float diffSq, float coeff); 
-  float gaussianGain(float x, float mu, float sigma); 
+  float gaussianGainOptimized(float diffSq, float coeff); // Nová optimalizovaná verze
+  float gaussianGain(float x, float mu, float sigma); // Původní (wrapper)
   
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
-  
-  // Procesuje výstup (Global transform, Downsample, Units) - voláno na konci update()
-  void processOutput();
 
 public:
   TriSenseFusion(ICM42688P* imu, AK09918C* mag);
@@ -123,20 +104,7 @@ public:
   void initOrientation(int samples = 250);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  // Stará metoda (ponechána pro interní výpočty)
-  void getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g);
-
-  // --- Configuration Methods ---
-  void useG(bool use);
-  void setG(float gravityValue);
-  void enableGlobalAccel(bool enable);
-  void setDownsampling(int factor);
-
-  // Getters pro processed data
-  float getAccelX() { return ax; }
-  float getAccelY() { return ay; }
-  float getAccelZ() { return az; }
-  // ... ostatní gettery můžeš dopsat, ale ax/ay/az jsou veřejné proměnné
+  void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
 
   // Setters
   void setAccelGaussian(float ref, float sigma);

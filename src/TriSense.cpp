@@ -47,42 +47,21 @@ void TriSense::autoCalibrateAccel() {
 // --- TriSenseFusion Implementation ---
 
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {
+  // Inicializace výchozích Gaussian koeficientů
   setAccelGaussian(accRef, accSigma);
   setMagGaussian(magRef, magSigma, magTiltSigmaDeg);
-  
-  // Default Config
-  _useGUnits = true;            
-  _gravityConstant = 9.8065f;   
-  _globalAccelEnabled = false;  
-  _downsampleFactor = 1;        
-  _sampleCounter = 0;
-  
-  _sumAx = 0; _sumAy = 0; _sumAz = 0;
-  _sumGx = 0; _sumGy = 0; _sumGz = 0;
-  _sumMx = 0; _sumMy = 0; _sumMz = 0;
 }
-
-// --- Config Methods ---
-void TriSenseFusion::useG(bool use) { _useGUnits = use; }
-void TriSenseFusion::setG(float gravityValue) { _gravityConstant = gravityValue; }
-void TriSenseFusion::enableGlobalAccel(bool enable) { _globalAccelEnabled = enable; }
-void TriSenseFusion::setDownsampling(int factor) {
-    if (factor < 1) factor = 1;
-    _downsampleFactor = factor;
-    _sampleCounter = 0;
-    _sumAx = 0; _sumAy = 0; _sumAz = 0;
-    _sumGx = 0; _sumGy = 0; _sumGz = 0;
-    _sumMx = 0; _sumMy = 0; _sumMz = 0;
-}
-
 
 // OPTIMALIZACE: Rychlá verze s předpočítaným koeficientem
+// Vzorec: exp( - (diff^2) / (2*sigma^2) ) -> exp( - diffSq * coeff )
 inline float TriSenseFusion::gaussianGainOptimized(float diffSq, float coeff) {
     if (coeff == 0.0f) return 0.0f; 
+    // Pokud je rozdíl příliš velký, exp se blíží 0. Rychlý return šetří volání expf.
     if (diffSq * coeff > 10.0f) return 0.0f; 
     return expf(-diffSq * coeff);
 }
 
+// Zachování původního rozhraní pro kompatibilitu
 float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
   if (sigma == 0.0f) return 0.0f;
   float diff = x - mu;
@@ -91,6 +70,7 @@ float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
 
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) {
   accRef = ref; accSigma = sigma;
+  // Předvýpočet: 1 / (2 * sigma^2)
   if (sigma > 0.0001f) {
       _accGaussCoeff = 1.0f / (2.0f * sigma * sigma);
   } else {
@@ -100,8 +80,10 @@ void TriSenseFusion::setAccelGaussian(float ref, float sigma) {
 
 void TriSenseFusion::setMagGaussian(float ref, float sigma, float tiltSigma) {
   magRef = ref; magSigma = sigma; magTiltSigmaDeg = tiltSigma;
+  
   if (sigma > 0.0001f) _magGaussCoeff = 1.0f / (2.0f * sigma * sigma);
   else _magGaussCoeff = 0.0f;
+
   if (tiltSigma > 0.0001f) _tiltGaussCoeff = 1.0f / (2.0f * tiltSigma * tiltSigma);
   else _tiltGaussCoeff = 0.0f;
 }
@@ -151,6 +133,7 @@ void TriSenseFusion::setMagCheckInterval(float intervalMs) {
 }
 
 void TriSenseFusion::calibrateAccelStatic(int samples) {
+  // Zde ponecháme double pro akumulaci (přesnost kalibrace), ale optimalizujeme dělení
   double sumX=0, sumY=0, sumZ=0;
   float ax, ay, az, gx, gy, gz;
   
@@ -215,6 +198,7 @@ void TriSenseFusion::initOrientation(int samples) {
 }
 
 void TriSenseFusion::quaternionToEuler(float& roll, float& pitch, float& yaw) {
+  // Používáme suffix 'f' pro všechny konstanty a funkce
   float sinr_cosp = 2.0f * (q[0] * q[1] + q[2] * q[3]);
   float cosr_cosp = 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]);
   roll = atan2f(sinr_cosp, cosr_cosp);
@@ -242,6 +226,7 @@ void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw
 }
 
 void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw) {
+  // atan2f a sqrtf jsou hardwarově akcelerované na Cortex-M33
   roll  = atan2f(ay, az) * RAD_TO_DEG_F;
   pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD_TO_DEG_F;
   
@@ -262,8 +247,7 @@ void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx,
   if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-// Toto je tvá původní funkce pro interní výpočet
-void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g) {
+void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g) {
   float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
 
   float x2 = qx + qx; 
@@ -287,65 +271,8 @@ void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, flo
   az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0f - (xx + yy)) * lastAz;
 }
 
-// --- NEW FUNCTION: Post-processing (The wrapper) ---
-void TriSenseFusion::processOutput() {
-    float tempAx = lastAx; // RAW Body frame (already calibrated for scale/offset in update)
-    float tempAy = lastAy;
-    float tempAz = lastAz;
-
-    float finalAx, finalAy, finalAz;
-
-    if (_globalAccelEnabled) {
-        // Použijeme tvou původní matematiku pro rotaci
-        getGlobalAccelerationInternal(finalAx, finalAy, finalAz);
-        
-        // Remove gravity (Z is up)
-        finalAz -= 1.0f; 
-    } else {
-        // Body Frame
-        finalAx = tempAx;
-        finalAy = tempAy;
-        finalAz = tempAz;
-    }
-
-    // Accumulate for downsampling
-    _sumAx += finalAx; _sumAy += finalAy; _sumAz += finalAz;
-    _sumGx += lastGx;  _sumGy += lastGy;  _sumGz += lastGz;
-    _sumMx += lastMx;  _sumMy += lastMy;  _sumMz += lastMz;
-
-    _sampleCounter++;
-
-    if (_sampleCounter >= _downsampleFactor) {
-        float scale = 1.0f / _downsampleFactor;
-        
-        ax = _sumAx * scale;
-        ay = _sumAy * scale;
-        az = _sumAz * scale;
-        
-        gx = _sumGx * scale;
-        gy = _sumGy * scale;
-        gz = _sumGz * scale;
-        
-        mx = _sumMx * scale;
-        my = _sumMy * scale;
-        mz = _sumMz * scale;
-        
-        // Unit Conversion (G -> m/s^2)
-        if (!_useGUnits) {
-            ax *= _gravityConstant;
-            ay *= _gravityConstant;
-            az *= _gravityConstant;
-        }
-
-        _sumAx = 0; _sumAy = 0; _sumAz = 0;
-        _sumGx = 0; _sumGy = 0; _sumGz = 0;
-        _sumMx = 0; _sumMy = 0; _sumMz = 0;
-        _sampleCounter = 0;
-    }
-}
-
 void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
-  float halfDt = 0.5f * dt; 
+  float halfDt = 0.5f * dt; // Optimalizace: násobení jen jednou
   
   float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
 
@@ -359,8 +286,10 @@ void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
   q[2] += qDot3 * halfDt;
   q[3] += qDot4 * halfDt;
 
+  // Normalizace
   float normSq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
   
+  // Fast Inverse Square Root zde není nutný, sqrtf je na Pico 2 dostatečně rychlý
   if (normSq > 0.0f) {
       float recipNorm = 1.0f / sqrtf(normSq);
       q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
@@ -377,6 +306,7 @@ bool SimpleTriFusion::update() {
   gx -= gyroOffset[0];  gy -= gyroOffset[1];  gz -= gyroOffset[2];
 
   unsigned long now = micros();
+  // Optimalizace: násobení místo dělení
   float dt = (float)(now - lastTime) * 1.0e-6f; 
   if (dt <= 0.0f) dt = 0.000125f; 
   lastTime = now;
@@ -390,15 +320,13 @@ bool SimpleTriFusion::update() {
   lastAx = ax; lastAy = ay; lastAz = az;
   lastGx = gx; lastGy = gy; lastGz = gz;
 
-  processOutput(); // Apply config settings to output vars
-
   return true;
 }
 
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt) {
-  // === TOTO JE VRÁCENO DO PŮVODNÍHO STAVU (Z TVÉHO SOUBORU) ===
+  // Použití sqrtf pro float a reciprokou hodnotu pro normalizaci
   float totalAccelGSq = ax * ax + ay * ay + az * az;
   float totalAccelG = sqrtf(totalAccelGSq);
   
@@ -407,11 +335,14 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
       ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
   }
 
+  // To samé pro magnetometr
   float magStrengthSq = mx * mx + my * my + mz * mz;
   float magStrength = sqrtf(magStrengthSq);
+  // Zde normalizace není nutná pro výpočty, jen pro GaussianGain (který bere surovou sílu)
 
   float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
 
+  // Předpočítané součiny pro zrychlení
   float vx = 2.0f * (q1 * q3 - q0 * q2);
   float vy = 2.0f * (q0 * q1 + q2 * q3);
   float vz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
@@ -419,6 +350,9 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float ex = (ay * vz - az * vy);
   float ey = (az * vx - ax * vz);
 
+  // OPTIMALIZOVANÝ GAUSSIAN GAIN
+  // Místo volání funkce s dělením používáme předpočítané koeficienty
+  // diff = x - mu. Zde mu = accRef.
   float accDiff = totalAccelG - accRef;
   float g_gain_accel_raw = gaussianGainOptimized(accDiff * accDiff, _accGaussCoeff);
 
@@ -434,13 +368,17 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float roll_deg = roll_rad * RAD_TO_DEG_F;
   float pitch_deg = pitch_rad * RAD_TO_DEG_F;
   
+  // Optimalizovaný tilt gain
   float tilt_gain_roll = gaussianGainOptimized(roll_deg * roll_deg, _tiltGaussCoeff);
   float tilt_gain_pitch = gaussianGainOptimized(pitch_deg * pitch_deg, _tiltGaussCoeff);
   
   final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
 
   float roll_corr, pitch_corr, yaw_corr;
-  // Vráceno: Zde se musí volat s násobkem totalAccelG, protože funkce očekává nenormalizovaná data pro atan2
+  // getCorrectionAngles očekává nenormalizované vektory pro akcelerometr (kvůli výpočtu pitch/roll), 
+  // ale my jsme ax,ay,az už normalizovali. Musíme je vrátit zpět na velikost G, nebo funkci upravit.
+  // Původní kód dělal: getCorrectionAngles(ax * totalAccelG, ...)
+  // Takže zde:
   getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
 
   float yaw_deg = yaw_rad * RAD_TO_DEG_F;
@@ -495,6 +433,7 @@ bool AdvancedTriFusion::update() {
   lastGz = gz - gyroOffset[2];
 
   unsigned long now = micros();
+  // Optimalizace dělení
   float dt = (float)(now - lastTime) * 1.0e-6f;
   if (dt <= 0.0f) dt = 0.0000625f; 
   lastTime = now;
@@ -523,8 +462,6 @@ bool AdvancedTriFusion::update() {
         lastSuccessfulCorrectionTime = now;
      }
   }
-
-  processOutput(); // Aplikace formátování na výstupní proměnné
 
   return true;
 }
