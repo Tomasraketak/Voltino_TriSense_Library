@@ -140,34 +140,6 @@ void TriSenseFusion::calibrateStaticGlobalAccel(int samples) {
 
 // --- Processing Logic ---
 
-// Wrapper to reuse existing rotation logic but apply user settings
-void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g) {
-  float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
-
-  float x2 = qx + qx; 
-  float y2 = qy + qy; 
-  float z2 = qz + qz;
-  
-  float xx = qx * x2; 
-  float xy = qx * y2; 
-  float xz = qx * z2;
-  
-  float yy = qy * y2; 
-  float yz = qy * z2; 
-  float zz = qz * z2;
-  
-  float wx = qw * x2; 
-  float wy = qw * y2; 
-  float wz = qw * z2;
-
-  // Rotace vektoru zrychlení (lastAx je v Body Frame v G)
-  // Vzorec z původního kódu provádí rotaci a zároveň by měl řešit gravitaci,
-  // ale pro jistotu použijeme rotaci čistého vektoru
-  ax_g = (1.0f - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
-  ay_g = (xy + wz) * lastAx + (1.0f - (xx + zz)) * lastAy + (yz - wx) * lastAz;
-  az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0f - (xx + yy)) * lastAz;
-}
-
 void TriSenseFusion::processOutput() {
     float finalAx, finalAy, finalAz;
 
@@ -176,6 +148,7 @@ void TriSenseFusion::processOutput() {
         getGlobalAccelerationInternal(finalAx, finalAy, finalAz);
         
         // Remove Gravity (Assuming Z is UP in global frame, remove 1G)
+        // Gravity is removed in G units here because getGlobalAccelerationInternal returns G based on lastAx
         finalAz -= 1.0f; 
 
         // Apply Static Bias Correction (Drift removal)
@@ -421,8 +394,7 @@ void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx,
   if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-// Renamed from getGlobalAcceleration to internal helper to avoid confusion
-// logic kept 1:1, used by processOutput
+// Helper function used by processOutput
 void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g) {
   float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
 
