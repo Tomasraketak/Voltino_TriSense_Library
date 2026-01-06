@@ -19,6 +19,16 @@ enum TriSenseMode {
   MODE_HYBRID   // AK and BMP on I2C, ICM on SPI
 };
 
+// --- NOVÉ: Enum pro směr os ---
+enum TriAxis {
+  AXIS_Z_PLUS_UP,   // Výchozí (Standardní montáž)
+  AXIS_Z_MINUS_UP,  // Vzhůru nohama
+  AXIS_X_PLUS_UP,   // Na boku (X míří nahoru)
+  AXIS_X_MINUS_UP,  // Na boku (X míří dolů)
+  AXIS_Y_PLUS_UP,   // Na čele (Y míří nahoru)
+  AXIS_Y_MINUS_UP   // Na čele (Y míří dolů)
+};
+
 class TriSense {
 public:
   BMP580 bmp;
@@ -81,14 +91,18 @@ public:
 
 protected:
   // OPTIMALIZACE: Předpočítané koeficienty pro Gaussian funkce
-  // Ukládáme 1.0 / (2 * sigma * sigma) pro rychlé násobení
   float _accGaussCoeff = 0.0f;
   float _magGaussCoeff = 0.0f;
   float _tiltGaussCoeff = 0.0f;
 
+  // --- NOVÉ: Nastavení os ---
+  TriAxis _axisConfig = AXIS_Z_PLUS_UP;
+  
   // Internal methods
-  float gaussianGainOptimized(float diffSq, float coeff); // Nová optimalizovaná verze
-  float gaussianGain(float x, float mu, float sigma); // Původní (wrapper)
+  void remapAxis(float& x, float& y, float& z); // Metoda pro prohození os
+  
+  float gaussianGainOptimized(float diffSq, float coeff); 
+  float gaussianGain(float x, float mu, float sigma); 
   
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
@@ -99,6 +113,9 @@ public:
   
   virtual bool update() = 0;
   
+  // --- NOVÉ: Veřejná metoda pro nastavení os ---
+  void setUpAxis(TriAxis axis);
+
   void calibrateAccelStatic(int samples = 1000);
   
   void initOrientation(int samples = 250);

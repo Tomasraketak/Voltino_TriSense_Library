@@ -52,16 +52,53 @@ TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(
   setMagGaussian(magRef, magSigma, magTiltSigmaDeg);
 }
 
+// --- NOVÉ: Implementace nastavení os ---
+void TriSenseFusion::setUpAxis(TriAxis axis) {
+    _axisConfig = axis;
+}
+
+// --- NOVÉ: Implementace prohození os ---
+void TriSenseFusion::remapAxis(float& x, float& y, float& z) {
+    float tx = x;
+    float ty = y;
+    float tz = z;
+
+    // Transformace tak, aby platilo pravidlo pravé ruky
+    switch (_axisConfig) {
+        case AXIS_X_PLUS_UP: 
+            // Fyzické X je nahoře. Otočení -90 st kolem Y.
+            x = -tz; y = ty; z = tx; 
+            break;
+        case AXIS_X_MINUS_UP:
+            // Fyzické -X je nahoře. Otočení +90 st kolem Y.
+            x = tz; y = ty; z = -tx; 
+            break;
+        case AXIS_Y_PLUS_UP:
+            // Fyzické Y je nahoře. Otočení +90 st kolem X.
+            x = tx; y = -tz; z = ty;
+            break;
+        case AXIS_Y_MINUS_UP:
+            // Fyzické -Y je nahoře. Otočení -90 st kolem X.
+            x = tx; y = tz; z = -ty;
+            break;
+        case AXIS_Z_MINUS_UP:
+            // Vzhůru nohama. Otočení 180 st kolem X.
+            x = tx; y = -ty; z = -tz;
+            break;
+        case AXIS_Z_PLUS_UP:
+        default:
+            // Žádná změna
+            break;
+    }
+}
+
 // OPTIMALIZACE: Rychlá verze s předpočítaným koeficientem
-// Vzorec: exp( - (diff^2) / (2*sigma^2) ) -> exp( - diffSq * coeff )
 inline float TriSenseFusion::gaussianGainOptimized(float diffSq, float coeff) {
     if (coeff == 0.0f) return 0.0f; 
-    // Pokud je rozdíl příliš velký, exp se blíží 0. Rychlý return šetří volání expf.
     if (diffSq * coeff > 10.0f) return 0.0f; 
     return expf(-diffSq * coeff);
 }
 
-// Zachování původního rozhraní pro kompatibilitu
 float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
   if (sigma == 0.0f) return 0.0f;
   float diff = x - mu;
@@ -70,7 +107,6 @@ float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
 
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) {
   accRef = ref; accSigma = sigma;
-  // Předvýpočet: 1 / (2 * sigma^2)
   if (sigma > 0.0001f) {
       _accGaussCoeff = 1.0f / (2.0f * sigma * sigma);
   } else {
@@ -133,12 +169,14 @@ void TriSenseFusion::setMagCheckInterval(float intervalMs) {
 }
 
 void TriSenseFusion::calibrateAccelStatic(int samples) {
-  // Zde ponecháme double pro akumulaci (přesnost kalibrace), ale optimalizujeme dělení
   double sumX=0, sumY=0, sumZ=0;
   float ax, ay, az, gx, gy, gz;
   
   for(int i=0; i<samples; i++) {
     _imu->readFIFO(ax, ay, az, gx, gy, gz);
+    // --- NOVÉ: Aplikace remapování i při kalibraci ---
+    remapAxis(ax, ay, az);
+    // ------------------------------------------------
     sumX += ax; sumY += ay; sumZ += az;
     delay(1);
   }
@@ -156,17 +194,28 @@ void TriSenseFusion::initOrientation(int samples) {
   while(count < samples) {
      float ax, ay, az, gx, gy, gz;
      if(_imu->readFIFO(ax, ay, az, gx, gy, gz) && _mag->readData()) {
+         // --- NOVÉ: Remapování IMU ---
+         remapAxis(ax, ay, az);
+         
          ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
          axSum+=ax; aySum+=ay; azSum+=az;
          
-         float mx_raw = _mag->x - magHardIron[0];
-         float my_raw = _mag->y - magHardIron[1];
-         float mz_raw = _mag->z - magHardIron[2];
-         float mx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-         float my = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-         float mz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+         float mx = _mag->x;
+         float my = _mag->y;
+         float mz = _mag->z;
+         
+         // --- NOVÉ: Remapování MAG (před korekcí) ---
+         remapAxis(mx, my, mz);
+         // -------------------------------------------
 
-         mxSum+=mx; mySum+=my; mzSum+=mz;
+         float mx_raw = mx - magHardIron[0];
+         float my_raw = my - magHardIron[1];
+         float mz_raw = mz - magHardIron[2];
+         float mx_corr = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
+         float my_corr = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
+         float mz_corr = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+
+         mxSum+=mx_corr; mySum+=my_corr; mzSum+=mz_corr;
          count++;
          delay(2);
      }
@@ -198,7 +247,6 @@ void TriSenseFusion::initOrientation(int samples) {
 }
 
 void TriSenseFusion::quaternionToEuler(float& roll, float& pitch, float& yaw) {
-  // Používáme suffix 'f' pro všechny konstanty a funkce
   float sinr_cosp = 2.0f * (q[0] * q[1] + q[2] * q[3]);
   float cosr_cosp = 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]);
   roll = atan2f(sinr_cosp, cosr_cosp);
@@ -226,7 +274,6 @@ void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw
 }
 
 void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw) {
-  // atan2f a sqrtf jsou hardwarově akcelerované na Cortex-M33
   roll  = atan2f(ay, az) * RAD_TO_DEG_F;
   pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD_TO_DEG_F;
   
@@ -272,7 +319,7 @@ void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g
 }
 
 void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
-  float halfDt = 0.5f * dt; // Optimalizace: násobení jen jednou
+  float halfDt = 0.5f * dt; 
   
   float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
 
@@ -286,10 +333,8 @@ void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
   q[2] += qDot3 * halfDt;
   q[3] += qDot4 * halfDt;
 
-  // Normalizace
   float normSq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
   
-  // Fast Inverse Square Root zde není nutný, sqrtf je na Pico 2 dostatečně rychlý
   if (normSq > 0.0f) {
       float recipNorm = 1.0f / sqrtf(normSq);
       q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
@@ -302,11 +347,15 @@ bool SimpleTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
+  // --- NOVÉ: Přemapování os před zpracováním ---
+  remapAxis(ax, ay, az);
+  remapAxis(gx, gy, gz);
+  // -------------------------------------------
+
   ax -= accelOffset[0]; ay -= accelOffset[1]; az -= accelOffset[2];
   gx -= gyroOffset[0];  gy -= gyroOffset[1];  gz -= gyroOffset[2];
 
   unsigned long now = micros();
-  // Optimalizace: násobení místo dělení
   float dt = (float)(now - lastTime) * 1.0e-6f; 
   if (dt <= 0.0f) dt = 0.000125f; 
   lastTime = now;
@@ -326,7 +375,6 @@ bool SimpleTriFusion::update() {
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt) {
-  // Použití sqrtf pro float a reciprokou hodnotu pro normalizaci
   float totalAccelGSq = ax * ax + ay * ay + az * az;
   float totalAccelG = sqrtf(totalAccelGSq);
   
@@ -335,14 +383,11 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
       ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
   }
 
-  // To samé pro magnetometr
   float magStrengthSq = mx * mx + my * my + mz * mz;
   float magStrength = sqrtf(magStrengthSq);
-  // Zde normalizace není nutná pro výpočty, jen pro GaussianGain (který bere surovou sílu)
 
   float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
 
-  // Předpočítané součiny pro zrychlení
   float vx = 2.0f * (q1 * q3 - q0 * q2);
   float vy = 2.0f * (q0 * q1 + q2 * q3);
   float vz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
@@ -350,9 +395,6 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float ex = (ay * vz - az * vy);
   float ey = (az * vx - ax * vz);
 
-  // OPTIMALIZOVANÝ GAUSSIAN GAIN
-  // Místo volání funkce s dělením používáme předpočítané koeficienty
-  // diff = x - mu. Zde mu = accRef.
   float accDiff = totalAccelG - accRef;
   float g_gain_accel_raw = gaussianGainOptimized(accDiff * accDiff, _accGaussCoeff);
 
@@ -368,17 +410,12 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   float roll_deg = roll_rad * RAD_TO_DEG_F;
   float pitch_deg = pitch_rad * RAD_TO_DEG_F;
   
-  // Optimalizovaný tilt gain
   float tilt_gain_roll = gaussianGainOptimized(roll_deg * roll_deg, _tiltGaussCoeff);
   float tilt_gain_pitch = gaussianGainOptimized(pitch_deg * pitch_deg, _tiltGaussCoeff);
   
   final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
 
   float roll_corr, pitch_corr, yaw_corr;
-  // getCorrectionAngles očekává nenormalizované vektory pro akcelerometr (kvůli výpočtu pitch/roll), 
-  // ale my jsme ax,ay,az už normalizovali. Musíme je vrátit zpět na velikost G, nebo funkci upravit.
-  // Původní kód dělal: getCorrectionAngles(ax * totalAccelG, ...)
-  // Takže zde:
   getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
 
   float yaw_deg = yaw_rad * RAD_TO_DEG_F;
@@ -424,6 +461,11 @@ bool AdvancedTriFusion::update() {
   float ax, ay, az, gx, gy, gz;
   if (!_imu->readFIFO(ax, ay, az, gx, gy, gz)) return false;
 
+  // --- NOVÉ: Přemapování IMU dat ---
+  remapAxis(ax, ay, az);
+  remapAxis(gx, gy, gz);
+  // -------------------------------
+
   lastAx = ax - accelOffset[0];
   lastAy = ay - accelOffset[1];
   lastAz = az - accelOffset[2];
@@ -433,7 +475,6 @@ bool AdvancedTriFusion::update() {
   lastGz = gz - gyroOffset[2];
 
   unsigned long now = micros();
-  // Optimalizace dělení
   float dt = (float)(now - lastTime) * 1.0e-6f;
   if (dt <= 0.0f) dt = 0.0000625f; 
   lastTime = now;
@@ -447,9 +488,17 @@ bool AdvancedTriFusion::update() {
   if (now - lastMagCheckTime >= magCheckIntervalUs) {
      lastMagCheckTime = now;
      if (_mag->readData()) {
-        float mx_raw = _mag->x - magHardIron[0];
-        float my_raw = _mag->y - magHardIron[1];
-        float mz_raw = _mag->z - magHardIron[2];
+        float mx = _mag->x;
+        float my = _mag->y;
+        float mz = _mag->z;
+
+        // --- NOVÉ: Přemapování Magnetometru (před soft-iron) ---
+        remapAxis(mx, my, mz);
+        // -------------------------------------------------------
+
+        float mx_raw = mx - magHardIron[0];
+        float my_raw = my - magHardIron[1];
+        float mz_raw = mz - magHardIron[2];
         
         lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
         lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
