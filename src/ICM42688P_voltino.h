@@ -72,8 +72,6 @@ public:
   ICM42688P();
 
   // Inicializace
-  // Pro I2C: begin(BUS_I2C)
-  // Pro SPI: begin(BUS_SPI, csPin, frequency)
   bool begin(ICM_BUS busType, uint8_t pin = 0, uint32_t freq = 10000000);
 
   // Nastavení senzoru
@@ -84,13 +82,16 @@ public:
   // Kalibrace
   void setAccelOffset(float x, float y, float z);
   void setAccelScale(float x, float y, float z);
-  void resetHardwareOffsets(); // Vynuluje registry offsetů v čipu
+  
+  // OPRAVA: Přidána chybějící funkce setGyroOffset
+  void setGyroOffset(float x, float y, float z);
+
+  void resetHardwareOffsets(); 
   
   void autoCalibrateGyro(uint16_t samples = 1000);
   void autoCalibrateAccel(); 
 
   // Čtení dat
-  // Vrací true, pokud jsou data platná
   bool readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz);
   
   // Raw teploty
@@ -100,22 +101,20 @@ private:
   ICM_BUS _bus;
   uint8_t _csPin;
   uint32_t _spiFreq;
-  uint8_t _i2cAddr = 0x68; // Default AD0=0
+  uint8_t _i2cAddr = 0x68; 
 
   // Kalibrační hodnoty (softwarové)
   float accOffset[3] = {0.0f, 0.0f, 0.0f};
   float accScale[3]  = {1.0f, 1.0f, 1.0f};
   float gyrOffset[3] = {0.0f, 0.0f, 0.0f};
 
-  // Optimalizace: Předpočítané škálovací faktory (multiplikátory)
-  // Nahrazují dělení v každém cyklu
-  float _accelScaleFactor; // např. 1.0 / 16384.0
-  float _gyroScaleFactor;  // např. 1.0 / 131.0
+  // Optimalizace: Předpočítané škálovací faktory
+  float _accelScaleFactor; 
+  float _gyroScaleFactor;  
 
   // Low level
   void writeRegister(uint8_t reg, uint8_t data);
   uint8_t readRegister(uint8_t reg);
-  // Nová optimalizovaná metoda pro burst read
   void readRegisters(uint8_t startReg, uint8_t* buffer, size_t len);
   
   void setBank(uint8_t bank);
