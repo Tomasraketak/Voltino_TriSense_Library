@@ -51,13 +51,14 @@ public:
   // Orientation (Quaternion)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
-  // --- PUBLIC DATA (RAW Internal) ---
-  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G (Body frame)
-  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; // dps
-  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; // uT
+  // --- INTERNAL RAW DATA (Body Frame, G, dps, uT) ---
+  // Toto jsou data přímo ze senzoru po odečtení offsetů, ale PŘED downsamplingem/rotací
+  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; 
+  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; 
+  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; 
 
-  // --- PROCESSED OUTPUT DATA (User accessible) ---
-  // Tyto hodnoty už respektují nastavení useG, GlobalAccel, Downsampling
+  // --- PUBLIC PROCESSED OUTPUT ---
+  // Toto jsou finální data pro uživatele (Global/Body, m/s2 nebo G, Downsampled)
   float ax = 0.0f, ay = 0.0f, az = 0.0f;
   float gx = 0.0f, gy = 0.0f, gz = 0.0f;
   float mx = 0.0f, my = 0.0f, mz = 0.0f;
@@ -67,9 +68,6 @@ public:
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1.0f,0.0f,0.0f},{0.0f,1.0f,0.0f},{0.0f,0.0f,1.0f}}; 
-  
-  // NEW: Global Accel Bias (Drift removal for velocity)
-  float globalAccelBias[3] = {0.0f, 0.0f, 0.0f};
 
   // --- FILTER PARAMETERS ---
   float accRef = 1.0f;            
@@ -84,8 +82,6 @@ public:
   float maxMagGain = 0.4f;       
 
   unsigned long lastTime = 0;
-  
-  // Magnetometer check interval
   unsigned long magCheckIntervalUs = 500; 
 
 protected:
@@ -94,14 +90,14 @@ protected:
   float _magGaussCoeff = 0.0f;
   float _tiltGaussCoeff = 0.0f;
 
-  // Configuration Flags/Variables for Output
+  // --- NEW CONFIGURATION VARIABLES ---
   bool _useGUnits;
   float _gravityConstant;
   bool _globalAccelEnabled;
   int _downsampleFactor;
   int _sampleCounter;
 
-  // Accumulators for Downsampling
+  // Accumulators for downsampling
   float _sumAx, _sumAy, _sumAz;
   float _sumGx, _sumGy, _sumGz;
   float _sumMx, _sumMy, _sumMz;
@@ -114,7 +110,7 @@ protected:
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
   
-  // NEW: Processes raw data into final output (Downsampling, Units, Global Transform)
+  // Procesuje výstup (Global transform, Downsample, Units) - voláno na konci update()
   void processOutput();
 
 public:
@@ -124,32 +120,23 @@ public:
   
   void calibrateAccelStatic(int samples = 1000);
   
-  // NEW: Global Static Calibration for Velocity Drift
-  void calibrateStaticGlobalAccel(int samples = 1000);
-  
   void initOrientation(int samples = 250);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  // Legacy helper (returns pure global G without user scaling)
+  // Stará metoda (ponechána pro interní výpočty)
   void getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g);
 
-  // --- New Configuration Methods ---
-  void useG(bool use);               // true = G, false = m/s^2 (Default: true)
-  void setG(float gravityValue);     // Set gravity constant (Default: 9.8065)
-  void enableGlobalAccel(bool enable); // Transform accel to Earth frame
-  void setDownsampling(int factor);  // 1 = raw, >1 = average over N samples
-  void setGlobalAccelBias(float x, float y, float z);
+  // --- Configuration Methods ---
+  void useG(bool use);
+  void setG(float gravityValue);
+  void enableGlobalAccel(bool enable);
+  void setDownsampling(int factor);
 
-  // --- Getters for Processed Data ---
+  // Getters pro processed data
   float getAccelX() { return ax; }
   float getAccelY() { return ay; }
   float getAccelZ() { return az; }
-  float getGyroX() { return gx; }
-  float getGyroY() { return gy; }
-  float getGyroZ() { return gz; }
-  float getMagX() { return mx; }
-  float getMagY() { return my; }
-  float getMagZ() { return mz; }
+  // ... ostatní gettery můžeš dopsat, ale ax/ay/az jsou veřejné proměnné
 
   // Setters
   void setAccelGaussian(float ref, float sigma);

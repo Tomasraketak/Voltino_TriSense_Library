@@ -47,11 +47,10 @@ void TriSense::autoCalibrateAccel() {
 // --- TriSenseFusion Implementation ---
 
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {
-  // Inicializace výchozích Gaussian koeficientů
   setAccelGaussian(accRef, accSigma);
   setMagGaussian(magRef, magSigma, magTiltSigmaDeg);
   
-  // Default Settings requested by user
+  // Default Config
   _useGUnits = true;            
   _gravityConstant = 9.8065f;   
   _globalAccelEnabled = false;  
@@ -63,148 +62,17 @@ TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(
   _sumMx = 0; _sumMy = 0; _sumMz = 0;
 }
 
-// --- New Configuration Methods ---
-
-void TriSenseFusion::useG(bool use) {
-    _useGUnits = use;
-}
-
-void TriSenseFusion::setG(float gravityValue) {
-    _gravityConstant = gravityValue;
-}
-
-void TriSenseFusion::enableGlobalAccel(bool enable) {
-    _globalAccelEnabled = enable;
-}
-
+// --- Config Methods ---
+void TriSenseFusion::useG(bool use) { _useGUnits = use; }
+void TriSenseFusion::setG(float gravityValue) { _gravityConstant = gravityValue; }
+void TriSenseFusion::enableGlobalAccel(bool enable) { _globalAccelEnabled = enable; }
 void TriSenseFusion::setDownsampling(int factor) {
     if (factor < 1) factor = 1;
     _downsampleFactor = factor;
-    _sampleCounter = 0; 
-    
-    // Reset accumulators
+    _sampleCounter = 0;
     _sumAx = 0; _sumAy = 0; _sumAz = 0;
     _sumGx = 0; _sumGy = 0; _sumGz = 0;
     _sumMx = 0; _sumMy = 0; _sumMz = 0;
-}
-
-void TriSenseFusion::setGlobalAccelBias(float x, float y, float z) {
-    globalAccelBias[0] = x;
-    globalAccelBias[1] = y;
-    globalAccelBias[2] = z;
-}
-
-// --- Calibration Logic ---
-
-void TriSenseFusion::calibrateStaticGlobalAccel(int samples) {
-    if (samples <= 0) samples = 1000;
-
-    // Reset bias
-    globalAccelBias[0] = 0;
-    globalAccelBias[1] = 0;
-    globalAccelBias[2] = 0;
-
-    // Force Global Mode and No Downsampling specifically for calibration calculation
-    bool oldState = _globalAccelEnabled;
-    _globalAccelEnabled = true;
-
-    int oldDownsample = _downsampleFactor;
-    _downsampleFactor = 1;
-
-    double sumX = 0;
-    double sumY = 0;
-    double sumZ = 0;
-
-    for (int i = 0; i < samples; i++) {
-        // Must call the virtual update to get data processed
-        update(); 
-        
-        // Accumulate processed data (ax is now Global Accel in G or m/s^2 depending on useG)
-        // Note: Bias calculation depends on current unit setting!
-        sumX += ax;
-        sumY += ay;
-        sumZ += az;
-        
-        delay(3);
-    }
-
-    // Restore settings
-    _globalAccelEnabled = oldState;
-    _downsampleFactor = oldDownsample;
-    _sampleCounter = 0;
-
-    globalAccelBias[0] = (float)(sumX / samples);
-    globalAccelBias[1] = (float)(sumY / samples);
-    globalAccelBias[2] = (float)(sumZ / samples);
-}
-
-// --- Processing Logic ---
-
-void TriSenseFusion::processOutput() {
-    float finalAx, finalAy, finalAz;
-
-    if (_globalAccelEnabled) {
-        // Transform to Global Frame
-        getGlobalAccelerationInternal(finalAx, finalAy, finalAz);
-        
-        // Remove Gravity (Assuming Z is UP in global frame, remove 1G)
-        // Gravity is removed in G units here because getGlobalAccelerationInternal returns G based on lastAx
-        finalAz -= 1.0f; 
-
-        // Apply Static Bias Correction (Drift removal)
-        finalAx -= globalAccelBias[0];
-        finalAy -= globalAccelBias[1];
-        finalAz -= globalAccelBias[2];
-    } else {
-        // Body Frame
-        finalAx = lastAx;
-        finalAy = lastAy;
-        finalAz = lastAz;
-    }
-
-    // Accumulate for downsampling
-    _sumAx += finalAx;
-    _sumAy += finalAy;
-    _sumAz += finalAz;
-    
-    _sumGx += lastGx;
-    _sumGy += lastGy;
-    _sumGz += lastGz;
-    
-    _sumMx += lastMx;
-    _sumMy += lastMy;
-    _sumMz += lastMz;
-
-    _sampleCounter++;
-
-    if (_sampleCounter >= _downsampleFactor) {
-        float scale = 1.0f / _downsampleFactor;
-        
-        ax = _sumAx * scale;
-        ay = _sumAy * scale;
-        az = _sumAz * scale;
-        
-        gx = _sumGx * scale;
-        gy = _sumGy * scale;
-        gz = _sumGz * scale;
-        
-        mx = _sumMx * scale;
-        my = _sumMy * scale;
-        mz = _sumMz * scale;
-        
-        // Unit Conversion
-        if (!_useGUnits) {
-            ax *= _gravityConstant;
-            ay *= _gravityConstant;
-            az *= _gravityConstant;
-        }
-
-        // Reset
-        _sumAx = 0; _sumAy = 0; _sumAz = 0;
-        _sumGx = 0; _sumGy = 0; _sumGz = 0;
-        _sumMx = 0; _sumMy = 0; _sumMz = 0;
-        _sampleCounter = 0;
-    }
 }
 
 
@@ -394,7 +262,7 @@ void TriSenseFusion::getCorrectionAngles(float ax, float ay, float az, float mx,
   if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-// Helper function used by processOutput
+// Toto je tvá původní funkce pro interní výpočet
 void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g) {
   float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
 
@@ -417,6 +285,63 @@ void TriSenseFusion::getGlobalAccelerationInternal(float& ax_g, float& ay_g, flo
   ax_g = (1.0f - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
   ay_g = (xy + wz) * lastAx + (1.0f - (xx + zz)) * lastAy + (yz - wx) * lastAz;
   az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0f - (xx + yy)) * lastAz;
+}
+
+// --- NEW FUNCTION: Post-processing (The wrapper) ---
+void TriSenseFusion::processOutput() {
+    float tempAx = lastAx; // RAW Body frame (already calibrated for scale/offset in update)
+    float tempAy = lastAy;
+    float tempAz = lastAz;
+
+    float finalAx, finalAy, finalAz;
+
+    if (_globalAccelEnabled) {
+        // Použijeme tvou původní matematiku pro rotaci
+        getGlobalAccelerationInternal(finalAx, finalAy, finalAz);
+        
+        // Remove gravity (Z is up)
+        finalAz -= 1.0f; 
+    } else {
+        // Body Frame
+        finalAx = tempAx;
+        finalAy = tempAy;
+        finalAz = tempAz;
+    }
+
+    // Accumulate for downsampling
+    _sumAx += finalAx; _sumAy += finalAy; _sumAz += finalAz;
+    _sumGx += lastGx;  _sumGy += lastGy;  _sumGz += lastGz;
+    _sumMx += lastMx;  _sumMy += lastMy;  _sumMz += lastMz;
+
+    _sampleCounter++;
+
+    if (_sampleCounter >= _downsampleFactor) {
+        float scale = 1.0f / _downsampleFactor;
+        
+        ax = _sumAx * scale;
+        ay = _sumAy * scale;
+        az = _sumAz * scale;
+        
+        gx = _sumGx * scale;
+        gy = _sumGy * scale;
+        gz = _sumGz * scale;
+        
+        mx = _sumMx * scale;
+        my = _sumMy * scale;
+        mz = _sumMz * scale;
+        
+        // Unit Conversion (G -> m/s^2)
+        if (!_useGUnits) {
+            ax *= _gravityConstant;
+            ay *= _gravityConstant;
+            az *= _gravityConstant;
+        }
+
+        _sumAx = 0; _sumAy = 0; _sumAz = 0;
+        _sumGx = 0; _sumGy = 0; _sumGz = 0;
+        _sumMx = 0; _sumMy = 0; _sumMz = 0;
+        _sampleCounter = 0;
+    }
 }
 
 void TriSenseFusion::gyroIntegration(float gx, float gy, float gz, float dt) {
@@ -465,8 +390,7 @@ bool SimpleTriFusion::update() {
   lastAx = ax; lastAy = ay; lastAz = az;
   lastGx = gx; lastGy = gy; lastGz = gz;
 
-  // Final step: Process for Output (Downsample, Global, Units)
-  processOutput();
+  processOutput(); // Apply config settings to output vars
 
   return true;
 }
@@ -474,6 +398,7 @@ bool SimpleTriFusion::update() {
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt) {
+  // === TOTO JE VRÁCENO DO PŮVODNÍHO STAVU (Z TVÉHO SOUBORU) ===
   float totalAccelGSq = ax * ax + ay * ay + az * az;
   float totalAccelG = sqrtf(totalAccelGSq);
   
@@ -515,6 +440,7 @@ void AdvancedTriFusion::complementaryCorrection(float ax, float ay, float az, fl
   final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
 
   float roll_corr, pitch_corr, yaw_corr;
+  // Vráceno: Zde se musí volat s násobkem totalAccelG, protože funkce očekává nenormalizovaná data pro atan2
   getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
 
   float yaw_deg = yaw_rad * RAD_TO_DEG_F;
@@ -598,8 +524,7 @@ bool AdvancedTriFusion::update() {
      }
   }
 
-  // Final step: Process for Output (Downsample, Global, Units)
-  processOutput();
+  processOutput(); // Aplikace formátování na výstupní proměnné
 
   return true;
 }
