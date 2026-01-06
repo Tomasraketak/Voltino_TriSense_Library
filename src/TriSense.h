@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <cmath> // Pro matematické funkce
+#include <cmath> 
 #include "BMP580.h"
 #include "AK09918C.h"
 #include "ICM42688P_voltino.h"
@@ -51,16 +51,25 @@ public:
   // Orientation (Quaternion)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
-  // --- PUBLIC DATA (RAW) ---
-  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G
+  // --- PUBLIC DATA (RAW Internal) ---
+  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G (Body frame)
   float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; // dps
   float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; // uT
+
+  // --- PROCESSED OUTPUT DATA (User accessible) ---
+  // Tyto hodnoty už respektují nastavení useG, GlobalAccel, Downsampling
+  float ax = 0.0f, ay = 0.0f, az = 0.0f;
+  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+  float mx = 0.0f, my = 0.0f, mz = 0.0f;
 
   // --- CALIBRATION DATA ---
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1.0f,0.0f,0.0f},{0.0f,1.0f,0.0f},{0.0f,0.0f,1.0f}}; 
+  
+  // NEW: Global Accel Bias (Drift removal for velocity)
+  float globalAccelBias[3] = {0.0f, 0.0f, 0.0f};
 
   // --- FILTER PARAMETERS ---
   float accRef = 1.0f;            
@@ -80,19 +89,33 @@ public:
   unsigned long magCheckIntervalUs = 500; 
 
 protected:
-  // OPTIMALIZACE: Předpočítané koeficienty pro Gaussian funkce
-  // Ukládáme 1.0 / (2 * sigma * sigma) pro rychlé násobení
+  // OPTIMALIZACE: Předpočítané koeficienty
   float _accGaussCoeff = 0.0f;
   float _magGaussCoeff = 0.0f;
   float _tiltGaussCoeff = 0.0f;
 
+  // Configuration Flags/Variables for Output
+  bool _useGUnits;
+  float _gravityConstant;
+  bool _globalAccelEnabled;
+  int _downsampleFactor;
+  int _sampleCounter;
+
+  // Accumulators for Downsampling
+  float _sumAx, _sumAy, _sumAz;
+  float _sumGx, _sumGy, _sumGz;
+  float _sumMx, _sumMy, _sumMz;
+
   // Internal methods
-  float gaussianGainOptimized(float diffSq, float coeff); // Nová optimalizovaná verze
-  float gaussianGain(float x, float mu, float sigma); // Původní (wrapper)
+  float gaussianGainOptimized(float diffSq, float coeff); 
+  float gaussianGain(float x, float mu, float sigma); 
   
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
+  
+  // NEW: Processes raw data into final output (Downsampling, Units, Global Transform)
+  void processOutput();
 
 public:
   TriSenseFusion(ICM42688P* imu, AK09918C* mag);
@@ -101,10 +124,32 @@ public:
   
   void calibrateAccelStatic(int samples = 1000);
   
+  // NEW: Global Static Calibration for Velocity Drift
+  void calibrateStaticGlobalAccel(int samples = 1000);
+  
   void initOrientation(int samples = 250);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
+  // Legacy helper (returns pure global G without user scaling)
+  void getGlobalAccelerationInternal(float& ax_g, float& ay_g, float& az_g);
+
+  // --- New Configuration Methods ---
+  void useG(bool use);               // true = G, false = m/s^2 (Default: true)
+  void setG(float gravityValue);     // Set gravity constant (Default: 9.8065)
+  void enableGlobalAccel(bool enable); // Transform accel to Earth frame
+  void setDownsampling(int factor);  // 1 = raw, >1 = average over N samples
+  void setGlobalAccelBias(float x, float y, float z);
+
+  // --- Getters for Processed Data ---
+  float getAccelX() { return ax; }
+  float getAccelY() { return ay; }
+  float getAccelZ() { return az; }
+  float getGyroX() { return gx; }
+  float getGyroY() { return gy; }
+  float getGyroZ() { return gz; }
+  float getMagX() { return mx; }
+  float getMagY() { return my; }
+  float getMagZ() { return mz; }
 
   // Setters
   void setAccelGaussian(float ref, float sigma);
