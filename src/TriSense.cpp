@@ -54,7 +54,8 @@ TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(
 
 float TriSenseFusion::gaussianGain(float x, float mu, float sigma) {
   if (sigma == 0.0f) return 0.0f;
-  return exp(-pow(x - mu, 2) / (2 * sigma * sigma));
+  float diff = x - mu;
+  return exp(-(diff * diff) / (2 * sigma * sigma));
 }
 
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) {
