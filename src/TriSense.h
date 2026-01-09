@@ -4,29 +4,13 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <cmath> // Pro matematické funkce
 #include "BMP580.h"
 #include "AK09918C.h"
 #include "ICM42688P_voltino.h"
 
-// Konstanty pro rychlé převody
-constexpr float DEG_TO_RAD_F = 3.1415926535f / 180.0f;
-constexpr float RAD_TO_DEG_F = 180.0f / 3.1415926535f;
-constexpr float PI_F = 3.1415926535f;
-
 enum TriSenseMode {
   MODE_I2C,
-  MODE_HYBRID   // AK and BMP on I2C, ICM on SPI
-};
-
-// --- NOVÉ: Enum pro směr os ---
-enum TriAxis {
-  AXIS_Z_PLUS_UP,   // Výchozí (Standardní montáž)
-  AXIS_Z_MINUS_UP,  // Vzhůru nohama
-  AXIS_X_PLUS_UP,   // Na boku (X míří nahoru)
-  AXIS_X_MINUS_UP,  // Na boku (X míří dolů)
-  AXIS_Y_PLUS_UP,   // Na čele (Y míří nahoru)
-  AXIS_Y_MINUS_UP   // Na čele (Y míří dolů)
+  MODE_HYBRID   // AK a BMP na I2C, ICM na SPI
 };
 
 class TriSense {
@@ -37,12 +21,16 @@ public:
 
   TriSense();
   
-  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 10000000);
+  // UPRAVENO: Defaultní hodnoty. 
+  // Pokud použiješ MODE_I2C, parametry spiCsPin a spiFreq se ignorují.
+  // Pokud MODE_HYBRID, freq defaultuje na 4MHz.
+  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000);
   
   bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
   bool beginMAG();
   
-  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t spiFreq = 10000000);
+  // Také zde defaulty
+  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000);
 
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = 1000);
@@ -52,112 +40,69 @@ private:
   TriSenseMode _mode;
 };
 
-// --- FUSION CLASS ---
+// ... TriSenseFusion TŘÍDY zůstávají stejné jako v předchozím kroku ...
 class TriSenseFusion {
 public: 
   ICM42688P* _imu;
   AK09918C* _mag;
-
-  // Orientation (Quaternion)
   float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-
-  // --- PUBLIC DATA (RAW) ---
-  float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f; // G
-  float lastGx = 0.0f, lastGy = 0.0f, lastGz = 0.0f; // dps
-  float lastMx = 0.0f, lastMy = 0.0f, lastMz = 0.0f; // uT
-
-  // --- CALIBRATION DATA ---
+  float lastAx = 0, lastAy = 0, lastAz = 0;
+  float lastGx = 0, lastGy = 0, lastGz = 0;
+  float lastMx = 0, lastMy = 0, lastMz = 0;
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
-  float magSoftIron[3][3] = {{1.0f,0.0f,0.0f},{0.0f,1.0f,0.0f},{0.0f,0.0f,1.0f}}; 
-
-  // --- FILTER PARAMETERS ---
-  float accRef = 1.0f;            
-  float accSigma = 0.02f;       
-  float magRef = 50.1f;          
-  float magSigma = 3.5f;        
+  float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
+  float accRef = 1.0f;          
+  float accSigma = 0.05f;       
+  float magRef = 50.88f;         
+  float magSigma = 3.5f;       
   float magTiltSigmaDeg = 15.0f;
   float magneticDeclination = 0.0f;
-
-  float yawKi = 0.0075f;           
-  float maxAccelGain = 0.4f;    
-  float maxMagGain = 0.4f;       
-
+  float yawKi = 0.005f;           
+  float maxAccelGain = 0.1f;    
+  float maxMagGain = 0.1f;      
   unsigned long lastTime = 0;
-  
-  // Magnetometer check interval
   unsigned long magCheckIntervalUs = 500; 
-
-protected:
-  // OPTIMALIZACE: Předpočítané koeficienty pro Gaussian funkce
-  float _accGaussCoeff = 0.0f;
-  float _magGaussCoeff = 0.0f;
-  float _tiltGaussCoeff = 0.0f;
-
-  // --- NOVÉ: Nastavení os ---
-  TriAxis _axisConfig = AXIS_Z_PLUS_UP;
-  
-  // Internal methods
-  void remapAxis(float& x, float& y, float& z); // Metoda pro prohození os
-  
-  float gaussianGainOptimized(float diffSq, float coeff); 
-  float gaussianGain(float x, float mu, float sigma); 
-  
+  float gaussianGain(float x, float mu, float sigma);
   void gyroIntegration(float gx, float gy, float gz, float dt);
   void getCorrectionAngles(float ax, float ay, float az, float mx, float my, float mz, float& roll, float& pitch, float& yaw);
   void quaternionToEuler(float& roll, float& pitch, float& yaw);
 
 public:
   TriSenseFusion(ICM42688P* imu, AK09918C* mag);
-  
   virtual bool update() = 0;
-  
-  // --- NOVÉ: Veřejná metoda pro nastavení os ---
-  void setUpAxis(TriAxis axis);
-
   void calibrateAccelStatic(int samples = 1000);
-  
-  void initOrientation(int samples = 250);
+  void initOrientation(int samples = 200);
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
-  
   void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
-
-  // Setters
   void setAccelGaussian(float ref, float sigma);
   void setMagGaussian(float ref, float sigma, float tiltSigma); 
   void setMagGaussian(float ref, float sigma);                  
-  void setMagTiltSigma(float sigmaDeg);                          
+  void setMagTiltSigma(float sigmaDeg);                         
   void setMagCalibration(float hardIron[3], float softIron[3][3]);
   void setDeclination(float deg);
-  
   void setGyroOffsets(float x, float y, float z);
   void setMagHardIron(float x, float y, float z);
   void setMagSoftIron(float matrix[3][3]);
   void setYawKi(float ki);
   void setMaxGains(float accelGain, float magGain);
-
   void setMagCheckInterval(float intervalMs);
 };
 
-// Simple implementation
 class SimpleTriFusion : public TriSenseFusion {
 public:
   SimpleTriFusion(ICM42688P* imu, AK09918C* mag);
   bool update() override;
 };
 
-// Advanced implementation
 class AdvancedTriFusion : public TriSenseFusion {
 private:
   unsigned long lastMagCheckTime = 0; 
   unsigned long lastSuccessfulCorrectionTime = 0; 
-  
   float gyroBiasZ = 0.0f;
   float lastDeltaYawRad = 0.0f;
-
   void complementaryCorrection(float ax, float ay, float az, float mx, float my, float mz, float correction_dt);
-
 public:
   AdvancedTriFusion(ICM42688P* imu, AK09918C* mag);
   bool update() override;
