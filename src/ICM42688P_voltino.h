@@ -4,8 +4,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <math.h> 
 
-// Registry
+// Registers
 #define ICM42688_REG_DEVICE_CONFIG  0x11
 #define ICM42688_REG_DRIVE_CONFIG   0x13
 #define ICM42688_REG_INT_CONFIG     0x14
@@ -35,7 +36,7 @@
 
 // ODR (Output Data Rate)
 typedef enum {
-  ODR_32KHZ = 1, // LN mode only
+  ODR_32KHZ = 1,
   ODR_16KHZ = 2,
   ODR_8KHZ  = 3,
   ODR_4KHZ  = 4,
@@ -61,7 +62,7 @@ typedef enum {
   GFS_125DPS  = 4
 } ICM_GYRO_FS;
 
-// Sběrnice
+// Bus type
 enum ICM_BUS {
   BUS_I2C,
   BUS_SPI
@@ -71,30 +72,42 @@ class ICM42688P {
 public:
   ICM42688P();
 
-  // Inicializace
+  // Initialization
   bool begin(ICM_BUS busType, uint8_t pin = 0, uint32_t freq = 10000000);
 
-  // Nastavení senzoru
+  // Configuration
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
   void setGyroFS(ICM_GYRO_FS fs);
   
-  // Kalibrace
+  // Calibration Setters
   void setAccelOffset(float x, float y, float z);
   void setAccelScale(float x, float y, float z);
-  
-  // OPRAVA: Přidána chybějící funkce setGyroOffset
   void setGyroOffset(float x, float y, float z);
+
+  // Calibration Getters (To retrieve values after auto-cal)
+  float getAccelOffsetX();
+  float getAccelOffsetY();
+  float getAccelOffsetZ();
+  float getAccelScaleX();
+  float getAccelScaleY();
+  float getAccelScaleZ();
+  float getGyroOffsetX();
+  float getGyroOffsetY();
+  float getGyroOffsetZ();
 
   void resetHardwareOffsets(); 
   
+  // Automatic Calibration Methods
+  // Note: These functions use Serial and delay(), so they are blocking!
   void autoCalibrateGyro(uint16_t samples = 1000);
+  
+  // This now implements the Sphere Fit algorithm (6-point)
   void autoCalibrateAccel(); 
 
-  // Čtení dat
+  // Data Reading
   bool readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz);
   
-  // Raw teploty
   float readTemperature();
 
 private:
@@ -103,12 +116,12 @@ private:
   uint32_t _spiFreq;
   uint8_t _i2cAddr = 0x68; 
 
-  // Kalibrační hodnoty (softwarové)
+  // Calibration Values
   float accOffset[3] = {0.0f, 0.0f, 0.0f};
   float accScale[3]  = {1.0f, 1.0f, 1.0f};
   float gyrOffset[3] = {0.0f, 0.0f, 0.0f};
 
-  // Optimalizace: Předpočítané škálovací faktory
+  // Helper variables
   float _accelScaleFactor; 
   float _gyroScaleFactor;  
 
