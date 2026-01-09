@@ -66,8 +66,7 @@ class ICM42688P {
 public:
   ICM42688P();
   
-  // UPRAVENO: Defaultní hodnoty pro pin (0) a frekvenci (4 MHz)
-  // Pokud je BUS_I2C, pin a freq se ignorují (a nastaví se I2C 400kHz)
+  // Defaultní hodnoty: pin 0, freq 4MHz (pro SPI), 400kHz (pro I2C)
   bool begin(ICM_BUS busType, uint8_t pin = 0, uint32_t freq = 4000000);
   
   void setODR(ICM_ODR odr);
@@ -88,7 +87,7 @@ public:
   void getAccelSoftwareOffset(float &ox, float &oy, float &oz);
   void getAccelSoftwareScale(float &sx, float &sy, float &sz);
 
-  // Wrappery
+  // Wrappery pro kompatibilitu
   void setGyroOffset(float ox, float oy, float oz);
   void setAccelOffset(float ox, float oy, float oz);
   void setAccelScale(float sx, float sy, float sz);
@@ -115,7 +114,6 @@ private:
   uint8_t _csPin;
   uint8_t _i2cAddr = ICM_ADDR;
   uint32_t _spiFreq;
-  SPISettings _spiSettings;
   ICM_ODR _odr;
 
   float _accelScaleFactor;
@@ -127,6 +125,9 @@ private:
 
   void writeRegister(uint8_t reg, uint8_t val);
   uint8_t readRegister(uint8_t reg);
-  void readRegisters(uint8_t reg, uint8_t *buf, uint8_t len);
+  
+  // ZDE BLA CHYBA: Změněno z uint8_t len na size_t len
+  void readRegisters(uint8_t reg, uint8_t *buf, size_t len);
+  
   void setBank(uint8_t bank);
 };
