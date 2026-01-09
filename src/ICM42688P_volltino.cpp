@@ -1,12 +1,11 @@
 #include "ICM42688P_voltino.h"
 
-// Konstruktor
 ICM42688P::ICM42688P() {
-  // Defaultní hodnoty
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
 }
 
+// Zde definice odpovídá prototypu, ale bez '= hodnota'
 bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
   _bus = busType;
   _csPin = pin;
@@ -16,28 +15,27 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
     pinMode(_csPin, OUTPUT);
     digitalWrite(_csPin, HIGH);
     SPI.begin();
+    // SPI Settings se nastaví dynamicky při každém přenosu pomocí _spiFreq
   } else {
+    // I2C Mód
     Wire.begin();
-    Wire.setClock(400000); 
+    Wire.setClock(400000); // 400 kHz Fast Mode
   }
   
   delay(10);
-
-  // Soft Reset
-  writeRegister(ICM42688_REG_DEVICE_CONFIG, 0x01);
+  writeRegister(ICM42688_REG_DEVICE_CONFIG, 0x01); // Soft Reset
   delay(10); 
 
-  // Check WHO_AM_I
   uint8_t who = readRegister(ICM42688_REG_WHO_AM_I);
-  if (who != 0x47) { 
+  if (who != 0x47) {
+    Serial.print("ICM WHO_AM_I Error. Expected 0x47, got 0x");
+    Serial.println(who, HEX);
     return false;
   }
 
-  // Zapnutí senzorů
-  writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); 
-  delay(1);
+  writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); // Sensors ON
+  delay(5);
 
-  // Defaultní konfigurace
   setAccelFS(AFS_16G);
   setGyroFS(GFS_2000DPS);
   setODR(ODR_1KHZ);
@@ -45,15 +43,15 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
   return true;
 }
 
-// --- OPTIMALIZACE: Blokové čtení ---
+// ... zbytek souboru je stejný jako v minulé verzi (readRegisters, writeRegister atd.) ...
+// PRO ÚPLNOST ZDE UVÁDÍM KRITICKÉ I/O FUNKCE:
+
 void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
     digitalWrite(_csPin, LOW);
     SPI.transfer(startReg | 0x80); 
-    for(size_t i=0; i<len; i++) {
-        buffer[i] = SPI.transfer(0x00);
-    }
+    for(size_t i=0; i<len; i++) buffer[i] = SPI.transfer(0x00);
     digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
@@ -61,10 +59,7 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
     Wire.write(startReg);
     Wire.endTransmission(false);
     Wire.requestFrom((int)_i2cAddr, (int)len);
-    for(size_t i=0; i<len; i++) {
-        if(Wire.available()) buffer[i] = Wire.read();
-        else buffer[i] = 0;
-    }
+    for(size_t i=0; i<len; i++) buffer[i] = (Wire.available()) ? Wire.read() : 0;
   }
 }
 
@@ -72,14 +67,12 @@ void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
     digitalWrite(_csPin, LOW);
-    SPI.transfer(reg & 0x7F); 
-    SPI.transfer(data);
+    SPI.transfer(reg & 0x7F); SPI.transfer(data);
     digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
     Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg);
-    Wire.write(data);
+    Wire.write(reg); Wire.write(data);
     Wire.endTransmission();
   }
 }
@@ -89,41 +82,31 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
     digitalWrite(_csPin, LOW);
-    SPI.transfer(reg | 0x80);
-    data = SPI.transfer(0x00);
+    SPI.transfer(reg | 0x80); data = SPI.transfer(0x00);
     digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
     Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg);
-    Wire.endTransmission(false);
+    Wire.write(reg); Wire.endTransmission(false);
     Wire.requestFrom((int)_i2cAddr, 1);
     if (Wire.available()) data = Wire.read();
   }
   return data;
 }
 
+// ... sem vlož zbytek funkcí (setODR, readFIFO, autoCalibrate, getters/setters) z předchozí odpovědi ...
+// Jsou identické, jen se ujisti, že jsou v souboru přítomny.
 void ICM42688P::setODR(ICM_ODR odr) {
   uint8_t odd = (uint8_t)odr;
-  uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0);
-  uint8_t aConf = readRegister(ICM42688_REG_ACCEL_CONFIG0);
-  
-  gConf &= 0xF0; 
-  gConf |= odd;
-  
-  aConf &= 0xF0; 
-  aConf |= odd;
-  
-  writeRegister(ICM42688_REG_GYRO_CONFIG0, gConf);
-  writeRegister(ICM42688_REG_ACCEL_CONFIG0, aConf);
+  uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
+  uint8_t aConf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0xF0;
+  writeRegister(ICM42688_REG_GYRO_CONFIG0, gConf | odd);
+  writeRegister(ICM42688_REG_ACCEL_CONFIG0, aConf | odd);
 }
 
 void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
-  uint8_t conf = readRegister(ICM42688_REG_ACCEL_CONFIG0);
-  conf &= 0x1F; 
-  conf |= (fs << 5);
-  writeRegister(ICM42688_REG_ACCEL_CONFIG0, conf);
-  
+  uint8_t conf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0x1F;
+  writeRegister(ICM42688_REG_ACCEL_CONFIG0, conf | (fs << 5));
   switch(fs) {
     case AFS_16G: _accelScaleFactor = 1.0f / 2048.0f; break;
     case AFS_8G:  _accelScaleFactor = 1.0f / 4096.0f; break;
@@ -133,11 +116,8 @@ void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
 }
 
 void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
-  uint8_t conf = readRegister(ICM42688_REG_GYRO_CONFIG0);
-  conf &= 0x1F; 
-  conf |= (fs << 5);
-  writeRegister(ICM42688_REG_GYRO_CONFIG0, conf);
-  
+  uint8_t conf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0x1F;
+  writeRegister(ICM42688_REG_GYRO_CONFIG0, conf | (fs << 5));
   switch(fs) {
     case GFS_2000DPS: _gyroScaleFactor = 1.0f / 16.4f; break;
     case GFS_1000DPS: _gyroScaleFactor = 1.0f / 32.8f; break;
@@ -147,53 +127,52 @@ void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
   }
 }
 
-void ICM42688P::setAccelOffset(float x, float y, float z) {
-  accOffset[0] = x; accOffset[1] = y; accOffset[2] = z;
-}
+void ICM42688P::setAccelOffset(float x, float y, float z) { accOffset[0] = x; accOffset[1] = y; accOffset[2] = z; }
+void ICM42688P::setAccelScale(float x, float y, float z) { accScale[0] = x; accScale[1] = y; accScale[2] = z; }
+void ICM42688P::setGyroOffset(float x, float y, float z) { gyrOffset[0] = x; gyrOffset[1] = y; gyrOffset[2] = z; }
 
-void ICM42688P::setAccelScale(float x, float y, float z) {
-  accScale[0] = x; accScale[1] = y; accScale[2] = z;
-}
+void ICM42688P::setGyroSoftwareOffset(float ox, float oy, float oz) { setGyroOffset(ox, oy, oz); }
+void ICM42688P::setAccelSoftwareOffset(float ox, float oy, float oz) { setAccelOffset(ox, oy, oz); }
+void ICM42688P::setAccelSoftwareScale(float sx, float sy, float sz) { setAccelScale(sx, sy, sz); }
 
-// OPRAVA: Implementace funkce pro nastavení offsetu gyra
-void ICM42688P::setGyroOffset(float x, float y, float z) {
-  gyrOffset[0] = x;
-  gyrOffset[1] = y;
-  gyrOffset[2] = z;
-}
+void ICM42688P::getGyroSoftwareOffset(float &ox, float &oy, float &oz) { ox = gyrOffset[0]; oy = gyrOffset[1]; oz = gyrOffset[2]; }
+void ICM42688P::getAccelSoftwareOffset(float &ox, float &oy, float &oz) { ox = accOffset[0]; oy = accOffset[1]; oz = accOffset[2]; }
+void ICM42688P::getAccelSoftwareScale(float &sx, float &sy, float &sz) { sx = accScale[0]; sy = accScale[1]; sz = accScale[2]; }
 
-void ICM42688P::resetHardwareOffsets() {
-  setBank(0); 
-}
+void ICM42688P::getGyroOffset(float &ox, float &oy, float &oz) { ox = gyrOffset[0]; oy = gyrOffset[1]; oz = gyrOffset[2]; }
+void ICM42688P::getAccelOffset(float &ox, float &oy, float &oz) { ox = accOffset[0]; oy = accOffset[1]; oz = accOffset[2]; }
+void ICM42688P::getAccelScale(float &sx, float &sy, float &sz) { sx = accScale[0]; sy = accScale[1]; sz = accScale[2]; }
 
-void ICM42688P::setBank(uint8_t bank) {
-  writeRegister(ICM42688_REG_BANK_SEL, bank);
-}
+float ICM42688P::getAccelOffsetX() { return accOffset[0]; }
+float ICM42688P::getAccelOffsetY() { return accOffset[1]; }
+float ICM42688P::getAccelOffsetZ() { return accOffset[2]; }
+float ICM42688P::getAccelScaleX() { return accScale[0]; }
+float ICM42688P::getAccelScaleY() { return accScale[1]; }
+float ICM42688P::getAccelScaleZ() { return accScale[2]; }
+float ICM42688P::getGyroOffsetX() { return gyrOffset[0]; }
+float ICM42688P::getGyroOffsetY() { return gyrOffset[1]; }
+float ICM42688P::getGyroOffsetZ() { return gyrOffset[2]; }
 
-// OPTIMALIZOVANÉ ČTENÍ DAT
+void ICM42688P::resetHardwareOffsets() { setBank(0); }
+void ICM42688P::setBank(uint8_t bank) { writeRegister(ICM42688_REG_BANK_SEL, bank); }
+
 bool ICM42688P::readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   uint8_t buffer[12];
   readRegisters(ICM42688_REG_ACCEL_DATA_X1, buffer, 12);
-
   int16_t rawAx = (int16_t)((buffer[0] << 8) | buffer[1]);
   int16_t rawAy = (int16_t)((buffer[2] << 8) | buffer[3]);
   int16_t rawAz = (int16_t)((buffer[4] << 8) | buffer[5]);
-  
   int16_t rawGx = (int16_t)((buffer[6] << 8) | buffer[7]);
   int16_t rawGy = (int16_t)((buffer[8] << 8) | buffer[9]);
   int16_t rawGz = (int16_t)((buffer[10] << 8) | buffer[11]);
-  
-  if (rawAx == -32768) return false;
-
-  // Aplikace kalibrace
+  if (rawAx == -1 && rawAy == -1 && rawAz == -1) return false;
+  if (rawAx == 0 && rawAy == 0 && rawAz == 0 && rawGx == 0) return false;
   ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
   ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
   az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
-  
   gx = (float)rawGx * _gyroScaleFactor - gyrOffset[0];
   gy = (float)rawGy * _gyroScaleFactor - gyrOffset[1];
   gz = (float)rawGz * _gyroScaleFactor - gyrOffset[2];
-  
   return true;
 }
 
@@ -205,52 +184,97 @@ float ICM42688P::readTemperature() {
 }
 
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
+  Serial.println("GYRO CALIBRATION (SW)... Keep still.");
+  gyrOffset[0] = 0; gyrOffset[1] = 0; gyrOffset[2] = 0;
   double gxSum = 0, gySum = 0, gzSum = 0;
   float ax, ay, az, gx, gy, gz;
-  
-  float oldOff[3] = {gyrOffset[0], gyrOffset[1], gyrOffset[2]};
-  gyrOffset[0] = 0; gyrOffset[1] = 0; gyrOffset[2] = 0;
-  
   int count = 0;
+  unsigned long startT = millis();
   while(count < samples) {
+    if (millis() - startT > 5000) {
+      Serial.println("Error: Sensor read timeout. Check wiring!");
+      return;
+    }
     if(readFIFO(ax, ay, az, gx, gy, gz)) {
-      gxSum += gx;
-      gySum += gy;
-      gzSum += gz;
+      gxSum += gx; gySum += gy; gzSum += gz;
       count++;
       delay(2); 
     }
   }
-  
   gyrOffset[0] = (float)(gxSum / samples);
   gyrOffset[1] = (float)(gySum / samples);
   gyrOffset[2] = (float)(gzSum / samples);
+  Serial.println("DONE. Results:");
+  Serial.print("Gyro Bias: ");
+  Serial.print(gyrOffset[0], 4); Serial.print(", ");
+  Serial.print(gyrOffset[1], 4); Serial.print(", ");
+  Serial.println(gyrOffset[2], 4);
 }
 
 void ICM42688P::autoCalibrateAccel() {
-  double axSum = 0, aySum = 0, azSum = 0;
-  float ax, ay, az, gx, gy, gz;
-  int samples = 500;
-  
+  Serial.println(F("\n=== 6-POINT ACCEL CALIBRATION (SW) ==="));
+  Serial.println(F("Place sensor in 6 orientations (Z+, Z-, Y+, Y-, X+, X-)"));
   accOffset[0] = 0; accOffset[1] = 0; accOffset[2] = 0;
   accScale[0] = 1; accScale[1] = 1; accScale[2] = 1;
-
-  int count = 0;
-  while(count < samples) {
-    if(readFIFO(ax, ay, az, gx, gy, gz)) {
-      axSum += ax;
-      aySum += ay;
-      azSum += az;
-      count++;
+  struct Vector { float x, y, z; };
+  Vector points[6];
+  for (int i = 0; i < 6; i++) {
+    Serial.print(F("\nPosition ")); Serial.print(i + 1); Serial.println(F("/6 -> Send 'y'"));
+    while (Serial.available()) Serial.read(); 
+    while (!Serial.available()); 
+    char cmd = Serial.read();
+    if (cmd == '\n' || cmd == '\r') { while(!Serial.available()); Serial.read(); }
+    Serial.println(F("Measuring..."));
+    double sumX = 0, sumY = 0, sumZ = 0;
+    int count = 0;
+    unsigned long start = millis();
+    while (millis() - start < 1500) {
+      float ax, ay, az, gx, gy, gz;
+      if (readFIFO(ax, ay, az, gx, gy, gz)) {
+        sumX += ax; sumY += ay; sumZ += az; count++;
+      }
       delay(2);
     }
+    if (count == 0) { Serial.println("Error: No data from sensor!"); return; }
+    points[i].x = sumX / count; points[i].y = sumY / count; points[i].z = sumZ / count;
+    Serial.print(F("Raw G: ")); Serial.print(points[i].x); Serial.print(", ");
+    Serial.print(points[i].y); Serial.print(", "); Serial.println(points[i].z);
   }
-  
-  float axAvg = (float)(axSum / samples);
-  float ayAvg = (float)(aySum / samples);
-  float azAvg = (float)(azSum / samples);
-  
-  accOffset[0] = axAvg;
-  accOffset[1] = ayAvg;
-  accOffset[2] = azAvg - 1.0f; 
+  Serial.println(F("\nCalculating Sphere Fit..."));
+  float bx = 0, by = 0, bz = 0;
+  float sx = 1, sy = 1, sz = 1;
+  float learningRate = 0.05;
+  for (int iter = 0; iter < 2000; iter++) {
+    float dbx = 0, dby = 0, dbz = 0;
+    float dsx = 0, dsy = 0, dsz = 0;
+    for (int i = 0; i < 6; i++) {
+      float adjX = (points[i].x - bx) * sx;
+      float adjY = (points[i].y - by) * sy;
+      float adjZ = (points[i].z - bz) * sz;
+      float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
+      float error = radius - 1.0f; 
+      float common = error / radius;
+      dbx += -2.0f * common * adjX * sx;
+      dby += -2.0f * common * adjY * sy;
+      dbz += -2.0f * common * adjZ * sz;
+      dsx += 2.0f * common * adjX * (points[i].x - bx);
+      dsy += 2.0f * common * adjY * (points[i].y - by);
+      dsz += 2.0f * common * adjZ * (points[i].z - bz);
+    }
+    bx -= learningRate * (dbx / 6.0f);
+    by -= learningRate * (dby / 6.0f);
+    bz -= learningRate * (dbz / 6.0f);
+    sx -= learningRate * (dsx / 6.0f);
+    sy -= learningRate * (dsy / 6.0f);
+    sz -= learningRate * (dsz / 6.0f);
+    if (iter % 200 == 0) learningRate *= 0.8;
+  }
+  accOffset[0] = bx; accOffset[1] = by; accOffset[2] = bz;
+  accScale[0] = sx; accScale[1] = sy; accScale[2] = sz;
+  Serial.println(F("\n--- COPY TO SETUP() ---"));
+  Serial.print(F("IMU.setAccelOffset(")); 
+  Serial.print(bx, 5); Serial.print(", "); Serial.print(by, 5); Serial.print(", "); Serial.print(bz, 5); Serial.println(");");
+  Serial.print(F("IMU.setAccelScale(")); 
+  Serial.print(sx, 5); Serial.print(", "); Serial.print(sy, 5); Serial.print(", "); Serial.print(sz, 5); Serial.println(");");
+  Serial.println(F("-----------------------"));
 }
