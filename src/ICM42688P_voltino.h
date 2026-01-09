@@ -35,16 +35,20 @@
 #define ICM42688_REG_BANK_SEL       0x76
 
 // ODR (Output Data Rate)
-typedef enum {
-  ODR_32KHZ = 1,
-  ODR_16KHZ = 2,
-  ODR_8KHZ  = 3,
-  ODR_4KHZ  = 4,
-  ODR_2KHZ  = 5,
-  ODR_1KHZ  = 6, // Default I2C
-  ODR_200HZ = 7,
-  ODR_50HZ  = 8
-} ICM_ODR;
+enum ICM_ODR {
+  ODR_32KHZ  = 1,
+  ODR_16KHZ  = 2,
+  ODR_8KHZ   = 3,
+  ODR_4KHZ   = 4,
+  ODR_2KHZ   = 5,
+  ODR_1KHZ   = 6,
+  ODR_200HZ  = 7,
+  ODR_100HZ  = 8,
+  ODR_50HZ   = 9,
+  ODR_25HZ   = 10,
+  ODR_12_5HZ = 11,
+  ODR_500HZ  = 15
+};
 
 // Full Scale Range
 typedef enum {
