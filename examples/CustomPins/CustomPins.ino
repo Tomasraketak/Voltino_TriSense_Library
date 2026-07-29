@@ -144,7 +144,7 @@ void setup() {
 void loop() {
   if (fusion.update()) {
     unsigned long now = millis();
-    if (now - lastPrintTime >= 20) { // 50Hz output
+    if (now - lastPrintTime >= 50) { // 20Hz output
       lastPrintTime = now;
 
       float roll, pitch, yaw;

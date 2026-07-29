@@ -11,7 +11,7 @@ TriSense sensor;
 AdvancedTriFusion fusion(&sensor.imu, &sensor.mag);
 
 unsigned long lastPrint = 0;
-const unsigned long printInterval = 20000; // 50Hz Serial output
+const unsigned long printInterval = 50000; // 20Hz Serial output
 
 void setup() {
   Serial.begin(115200);
