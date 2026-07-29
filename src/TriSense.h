@@ -177,7 +177,8 @@ public:
   void initOrientation(int samples = DEFAULT_CALIBRATION_SAMPLES);
   
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
-  
+  float getMagHeadingDegrees();
+
   void setLocalGravity(float g);
   void getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   void getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);

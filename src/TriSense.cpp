@@ -247,7 +247,18 @@ void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw
   if (yaw < 0) yaw += 360.0f; if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
+// Magnetometer-only heading (tilt-compensated using the fusion's current roll/
+// pitch), independent of the gyro-integrated yaw. Useful for comparing against
+// getOrientationDegrees()'s yaw to spot magnetic interference or bad calibration.
+// Requires the magnetometer to have been read at least once (AdvancedTriFusion
+// does this automatically; SimpleTriFusion never reads it, so lastMx/My/Mz stay 0).
+float TriSenseFusion::getMagHeadingDegrees() {
+  float roll, pitch, yaw;
+  getOrientationDegrees(roll, pitch, yaw);
+  return AK09918C::computeHeading((float)lastMx, (float)lastMy, (float)lastMz, roll, pitch, magneticDeclination);
+}
+
+void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
                                          FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                          FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {
   roll  = atan2(ay, az) * 180.0 / PI; pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / PI;

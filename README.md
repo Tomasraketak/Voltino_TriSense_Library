@@ -459,6 +459,7 @@ The IMU driver supports three reading modes:
 | `setODR(odr)` | Set output data rate (10, 20, 50, or 100 Hz) |
 | `setMode(mode)` | Set operation mode (Power-down, Single, Self-test) |
 | `softReset()` | Hardware reset |
+| `computeHeading(mx, my, mz, rollDeg, pitchDeg, declinationDeg)` *(static)* | Tilt-compensated heading (0–360°) from calibrated field components + roll/pitch |
 
 **Public members:**
 - `float x, y, z` — Field strength in µT
@@ -472,7 +473,10 @@ The IMU driver supports three reading modes:
 | `initOrientation(samples)` | Initialize quaternion from initial accel/mag readings |
 | `calibrateAccelStatic(samples)` | Simple static gravity offset calibration |
 | `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
+| `getMagHeadingDegrees()` | Tilt-compensated, magnetometer-only heading (0–360°), independent of the fused/gyro yaw |
 | `getGlobalAcceleration(x, y, z)` | Get Earth-frame linear acceleration (Gs) |
+| `getGlobalLinearAcceleration(x, y, z)` | Same as above with gravity removed |
+| `getActualFusionHz()` | Measured update rate of the fusion loop |
 | `setAccelGaussian(ref, sigma)` | Tune accelerometer trust function |
 | `setMagGaussian(ref, sigma)` | Tune magnetometer trust function |
 | `setMagGaussian(ref, sigma, tiltSigma)` | Tune with explicit tilt sigma |
