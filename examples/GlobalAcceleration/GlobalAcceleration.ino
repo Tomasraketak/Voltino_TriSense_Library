@@ -28,7 +28,7 @@ void setup() {
 
   Serial.println("Calibrating initial orientation...");
   fusion.initOrientation();
-  Serial.println("System Running. Format: R, P, Y | Ax_G, Ay_G, Az_G");
+  Serial.println("System Running. Format: R, P, Y | GlobalAcc(G) | LinearAcc(G)");
 }
 
 void loop() {
@@ -41,20 +41,26 @@ void loop() {
       float roll, pitch, yaw;
       fusion.getOrientationDegrees(roll, pitch, yaw);
 
-      // Get GLOBAL ACCELERATION [G]
+      // Get GLOBAL ACCELERATION [G] (gravity included, e.g. Z ~= +1G at rest)
       float ax_g, ay_g, az_g;
       fusion.getGlobalAcceleration(ax_g, ay_g, az_g);
 
-      // Remove Earth's 1G gravity from Z axis to get pure linear movement:
-      az_g -= 1.0f; 
+      // Get GLOBAL LINEAR ACCELERATION [G] - same as above but with gravity
+      // already removed by the library, ready for dead-reckoning integration.
+      float ax_lin, ay_lin, az_lin;
+      fusion.getGlobalLinearAcceleration(ax_lin, ay_lin, az_lin);
 
       Serial.print("R:"); Serial.print(roll, 1);
       Serial.print("\tP:"); Serial.print(pitch, 1);
       Serial.print("\tY:"); Serial.print(yaw, 1);
       
-      Serial.print("  |  LinAcc(G) -> X:"); Serial.print(ax_g, 3);
+      Serial.print("  |  GlobalAcc(G) -> X:"); Serial.print(ax_g, 3);
       Serial.print(" Y:"); Serial.print(ay_g, 3);
-      Serial.print(" Z:"); Serial.println(az_g, 3);
+      Serial.print(" Z:"); Serial.print(az_g, 3);
+
+      Serial.print("  |  LinearAcc(G) -> X:"); Serial.print(ax_lin, 3);
+      Serial.print(" Y:"); Serial.print(ay_lin, 3);
+      Serial.print(" Z:"); Serial.println(az_lin, 3);
     }
   }
 }
