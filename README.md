@@ -6,7 +6,7 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
-> **New in v4.0:** Automatic architecture detection, dual fusion backends, Smart Caching on the BMP580, high-res 20-bit FIFO mode, and platform-tuned defaults.
+> **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, and a custom SPI/I2C pin-mapping example.
 
 ---
 
@@ -53,9 +53,11 @@ The library auto-detects your platform and sets optimal defaults:
 | Platform | Math Type | Default SPI ODR | Calibration Samples |
 |----------|-----------|-----------------|---------------------|
 | **AVR** (Uno, Mega, Nano) | `float` | 500 Hz | 200 |
-| **ESP32** | `double` | 8 kHz | 1000 |
+| **ESP32** | `float` | 8 kHz | 1000 |
 | **RP2040 / RP2350** | `float` | 8 kHz | 1000 |
 | **Other** | `float` | 1 kHz | 500 |
+
+`float` is the default everywhere so the hardware FPU is used; `double` is selected only when you define `FORCE_FUSION_DOUBLE`.
 
 You can override precision manually by defining `FORCE_FUSION_FLOAT` or `FORCE_FUSION_DOUBLE` before including the library.
 
@@ -69,6 +71,14 @@ sensor.getSnapshot(data);
 // data.accelX, data.gyroX, data.magX, data.pressure, data.temperature ...
 ```
 
+### 🧮 Full-Batch Accelerometer Averaging
+
+Each `update()` drains every packet waiting in the IMU FIFO. The gyroscope is integrated **per sample**, so no rotation is ever lost. The accelerometer is *accumulated* across the whole batch and `lastAx/lastAy/lastAz` is set to the **batch mean**, which is what `getGlobalAcceleration()` and `getGlobalLinearAcceleration()` then rotate into the world frame.
+
+This matters because the FIFO delivers far more samples than a typical print/log loop consumes — at 8 kHz ODR polled at 50 Hz, roughly 160 samples arrive per iteration. Publishing only the newest packet would throw away ~99% of the data and hand you a single vibration-contaminated instant. Averaging keeps every sample, acts as a low-pass filter against airframe vibration, and gives `AdvancedTriFusion`'s gravity estimate a steadier input.
+
+> **Caveat:** the mean is taken in the **body frame** and then rotated by the quaternion as it stands at the *end* of the batch. If the board rotates significantly during one batch, that single rotation is an approximation. Keep your `update()` call rate high (batches short) if you care about world-frame accuracy under high spin rates.
+
 ### 🛠️ Smart BMP580 Caching
 
 The BMP580 driver uses an **adaptive cache** that intelligently re-reads the sensor only when the cached data has expired — based on the actual ODR frequency. This saves I²C bus bandwidth and reduces power consumption.
@@ -81,9 +91,11 @@ Supports three FIFO modes:
 - `FIFO_16BIT` — 16-bit FIFO packet mode (balanced)
 - `FIFO_20BIT_HIRES` — 20-bit high-resolution mode (16× precision, **automatically disabled on AVR** to save RAM)
 
-### 📈 Real-Time ODR Drift Tracker
+### 📈 MCU-Clocked Adaptive Timebase
 
-The fusion engine continuously measures the actual time between IMU samples (`_realDt`) and adapts to variations in the real-world output data rate, ensuring mathematically correct integration even under CPU load or bus contention.
+Integration timing is derived from the **MCU's own `micros()`**, never from the IMU's internal RC oscillator. On every `update()` the engine measures the wall-clock interval since the previous call, divides it by the number of FIFO packets actually drained, and uses that as the per-sample `dt`. The result is clamped to within ±2× of the nominal ODR period so a stalled loop or a bus hiccup can't inject a wild time-step.
+
+This keeps quaternion integration correct under CPU load and bus contention without trusting the sensor's clock. `getActualFusionHz()` reports the measured update rate of the fusion loop.
 
 ---
 
@@ -314,15 +326,15 @@ The error between the gyro-predicted yaw and the magnetometer-corrected yaw is t
 
 $$\Delta_{yaw} = yaw_{corr} - yaw_{estimate}$$
 
-This error drives an integral controller (`Ki`) which adjusts `gyroBiasZ`:
+This error drives an integral controller (`Ki`) which adjusts `gyroBiasZ`. All three `gyroBias[]` components are held in **deg/s**, matching the units of the gyro samples they are subtracted from, so the radian error is converted on the way in:
 
-$$bias_z -= K_i \cdot \Delta_{yaw} \cdot G_{mag} \cdot dt$$
+$$bias_z \mathrel{-}= K_i \cdot \Delta_{yaw} \cdot G_{mag} \cdot dt \cdot \frac{180}{\pi}$$
 
-The bias resets to zero if the error crosses zero (sign change), preventing wind-up. This effectively "learns" the gyroscope's resting drift, resulting in a stable heading even if the magnetometer is temporarily unavailable.
+Wind-up is prevented by **bounding** the accumulated bias to ±`setMaxGyroBias()` (default 5 dps). It is deliberately *not* reset on sign change: near convergence the yaw error oscillates about zero, so zeroing on every crossing would wipe the accumulator continuously and the controller could never settle on the steady-state bias it exists to find. Bounded integration lets it converge, giving a stable heading even when the magnetometer is temporarily unavailable.
 
-**5. Real-Time ODR Drift Tracker**
+**5. MCU-Clocked Timebase**
 
-Both fusion engines measure the actual time between IMU samples every second. If the measured dt is within 15% of the nominal dt, it is blended into `_realDt` using an exponential moving average. This ensures correct quaternion integration regardless of fluctuations in the actual bus read rate.
+Both engines take their time-step from the MCU's `micros()`, never the IMU's internal RC oscillator. Per `update()`, the elapsed wall-clock interval is divided by the number of packets drained from the FIFO to get the per-sample `dt`, then clamped to within ±2× of the nominal ODR period so a stalled loop cannot inject a wild time-step.
 
 ---
 
@@ -412,7 +424,7 @@ The IMU driver supports three reading modes:
 | `getSnapshot(data)` | Read all sensors into a `TriSenseDataSnapshot` struct |
 | `readPressure()` | Get pressure in Pa (smart-cached) |
 | `readTemperature()` | Get temperature in °C (smart-cached) |
-| `readAltitude(seaLevel)` | Get altitude in meters |
+| `readAltitude(seaLevelPa)` | Get altitude in meters. Reference pressure is in **Pascals** (default `101325.0`) |
 
 ### `ICM42688P` Class
 
@@ -474,9 +486,13 @@ The IMU driver supports three reading modes:
 | `calibrateAccelStatic(samples)` | Simple static gravity offset calibration |
 | `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
 | `getMagHeadingDegrees()` | Tilt-compensated, magnetometer-only heading (0–360°), independent of the fused/gyro yaw |
-| `getGlobalAcceleration(x, y, z)` | Get Earth-frame linear acceleration (Gs) |
-| `getGlobalLinearAcceleration(x, y, z)` | Same as above with gravity removed |
+| `getGlobalAcceleration(x, y, z, unit)` | World-frame acceleration, **gravity included** (batch-averaged, see above) |
+| `getGlobalLinearAcceleration(x, y, z, unit)` | Same as above with gravity removed — the quantity to integrate for dead reckoning |
+| `getLinearAcceleration(x, y, z, unit)` | Body-frame acceleration with gravity removed |
 | `getActualFusionHz()` | Measured update rate of the fusion loop |
+| `setLocalGravity(g)` | Set local gravity in m/s² (default `9.80665`; use your latitude's real value) |
+| `setDynamicGyroBias(enable, ki)` | Enable in-flight gyro drift learning on X/Y |
+| `setMaxGyroBias(maxDps)` | Anti-windup bound on the learned gyro bias (default `5.0` dps) |
 | `setAccelGaussian(ref, sigma)` | Tune accelerometer trust function |
 | `setMagGaussian(ref, sigma)` | Tune magnetometer trust function |
 | `setMagGaussian(ref, sigma, tiltSigma)` | Tune with explicit tilt sigma |

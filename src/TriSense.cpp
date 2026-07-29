@@ -111,6 +111,7 @@ void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
 }
 
 void TriSenseFusion::setDynamicGyroBias(bool enable, float ki) { _dynamicBiasEnabled = enable; _biasKi = ki; }
+void TriSenseFusion::setMaxGyroBias(float maxDps) { _maxGyroBiasDps = (maxDps < 0.0f) ? -maxDps : maxDps; }
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) { accRef = ref; accSigma = sigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma, float tiltSigma) { magRef = ref; magSigma = sigma; magTiltSigmaDeg = tiltSigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma) { magRef = ref; magSigma = sigma; }
@@ -404,6 +405,11 @@ bool SimpleTriFusion::update() {
         if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
         if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
+        // Accumulate every packet so lastA*/lastG* can publish the batch mean
+        // instead of only the final sample (see note after the loop).
+        FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+        FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+
         for(int i = 0; i < packetCount; i++) {
             float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
             float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
@@ -411,16 +417,23 @@ bool SimpleTriFusion::update() {
             remapAxes(ax_raw, ay_raw, az_raw);
             remapAxes(gx_raw, gy_raw, gz_raw);
 
-            lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-            lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+            FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
+            FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
+            FUSION_MATH_TYPE az = az_raw - accelOffset[2];
+            FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
+            FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
+            FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
 
-            FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gz_rad = lastGz * (FUSION_MATH_TYPE)PI/180.0;
+            sumAx += ax; sumAy += ay; sumAz += az;
+            sumGx += gx; sumGy += gy; sumGz += gz;
+
+            FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
 
             if (_lightweightGravityEnabled) {
-                FUSION_MATH_TYPE norm = invSqrt(lastAx*lastAx + lastAy*lastAy + lastAz*lastAz);
-                FUSION_MATH_TYPE ax_n = lastAx * norm, ay_n = lastAy * norm, az_n = lastAz * norm;
+                FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
+                FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
                 FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
                 FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
                 FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
@@ -428,10 +441,17 @@ bool SimpleTriFusion::update() {
                 gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
                 gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
             }
-            
+
             gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
             trackUpdateRate();
         }
+
+        // Publish the mean of the whole batch rather than just the final packet,
+        // so getGlobalAcceleration() sees every accelerometer sample the FIFO
+        // delivered. The per-sample values above still drive the integration.
+        FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
+        lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
+        lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
     }
   }
   return dataProcessed;
@@ -480,15 +500,24 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   if (delta_yaw_deg > 180.0) delta_yaw_deg -= 360.0; if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
   FUSION_MATH_TYPE delta_yaw_rad = delta_yaw_deg * (FUSION_MATH_TYPE)PI / 180.0;
   
-  if (lastDeltaYawRad * delta_yaw_rad < 0.0) gyroBias[2] = 0.0; 
-  lastDeltaYawRad = delta_yaw_rad;
-  
   if (_dynamicBiasEnabled) {
       gyroBias[0] -= (FUSION_MATH_TYPE)_biasKi * ex * final_accel_gain * correction_dt * 57.29578;
       gyroBias[1] -= (FUSION_MATH_TYPE)_biasKi * ey * final_accel_gain * correction_dt * 57.29578;
   }
-  gyroBias[2] -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
-  
+  // gyroBias[] is subtracted from lastGx/y/z, which are in dps, so the radian
+  // yaw error has to be converted to degrees here - the same 57.29578 factor
+  // the X/Y terms above already apply.
+  gyroBias[2] -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt * 57.29578;
+
+  // Anti-windup: bound the learned bias. The previous implementation zeroed
+  // gyroBias[2] whenever the yaw error changed sign, but near convergence the
+  // error oscillates about zero, so the accumulator was wiped on almost every
+  // correction and could never settle on the steady-state bias it exists to find.
+  for (int i = 0; i < 3; i++) {
+    if (gyroBias[i] >  (FUSION_MATH_TYPE)_maxGyroBiasDps) gyroBias[i] =  (FUSION_MATH_TYPE)_maxGyroBiasDps;
+    if (gyroBias[i] < -(FUSION_MATH_TYPE)_maxGyroBiasDps) gyroBias[i] = -(FUSION_MATH_TYPE)_maxGyroBiasDps;
+  }
+
   FUSION_MATH_TYPE w_x = final_accel_gain * ex * correction_dt; 
   FUSION_MATH_TYPE w_y = final_accel_gain * ey * correction_dt; 
   FUSION_MATH_TYPE w_z = final_mag_gain * delta_yaw_rad * correction_dt;
@@ -586,6 +615,11 @@ bool AdvancedTriFusion::update() {
       if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
       if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
+      // Accumulate every packet so lastA*/lastG* can publish the batch mean
+      // instead of only the final sample (see note after the loop).
+      FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+      FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+
       for(int i = 0; i < packetCount; i++) {
           float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
           float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
@@ -593,15 +627,31 @@ bool AdvancedTriFusion::update() {
           remapAxes(ax_raw, ay_raw, az_raw);
           remapAxes(gx_raw, gy_raw, gz_raw);
 
-          lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-          lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
+          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
+          FUSION_MATH_TYPE az = az_raw - accelOffset[2];
+          FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
+          FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
+          FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
 
-          gyroIntegration((lastGx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0, 
-                          (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
-                          (lastGz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
+          sumAx += ax; sumAy += ay; sumAz += az;
+          sumGx += gx; sumGy += gy; sumGz += gz;
+
+          gyroIntegration((gx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0,
+                          (gy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0,
+                          (gz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
           trackUpdateRate();
       }
-      
+
+      // Publish the mean of the whole batch. Previously lastA* was overwritten
+      // every iteration, so getGlobalAcceleration() only ever saw the final
+      // packet - at 8kHz ODR read at 50Hz that discarded ~99% of the samples.
+      // Averaging keeps every sample and low-passes vibration, which also makes
+      // the gravity estimate fed to complementaryCorrection() below steadier.
+      FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
+      lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
+      lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
+
       // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {

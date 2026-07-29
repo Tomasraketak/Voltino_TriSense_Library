@@ -102,7 +102,8 @@ public:
   bool getSnapshot(TriSenseDataSnapshot &data);
   float readPressure();
   float readTemperature();
-  float readAltitude(float seaLevelPressure = 1013.25f);
+  // Sea-level reference pressure is in PASCALS (matches BMP580::readAltitude).
+  float readAltitude(float seaLevelPressure = 101325.0f);
 
 private:
   TriSenseMode _mode;
@@ -131,10 +132,11 @@ public:
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   
-  // Dynamic Gyro Bias (In-flight drift correction)
-  FUSION_MATH_TYPE gyroBias[3] = {0.0, 0.0, 0.0}; 
+  // Dynamic Gyro Bias (In-flight drift correction). Units: dps, matching lastGx/y/z.
+  FUSION_MATH_TYPE gyroBias[3] = {0.0, 0.0, 0.0};
   bool _dynamicBiasEnabled = false;
   float _biasKi = 0.0001f;
+  float _maxGyroBiasDps = 5.0f;   // Anti-windup bound on the learned bias
 
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
@@ -185,6 +187,7 @@ public:
   void getGlobalLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   
   void setDynamicGyroBias(bool enable, float ki = 0.0001f);
+  void setMaxGyroBias(float maxDps);
   void setAccelGaussian(float ref, float sigma);
   void setMagGaussian(float ref, float sigma, float tiltSigma); 
   void setMagGaussian(float ref, float sigma);                  
@@ -211,10 +214,9 @@ public:
 
 class AdvancedTriFusion : public TriSenseFusion {
 private:
-  unsigned long lastMagCheckTime = 0; 
-  unsigned long lastSuccessfulCorrectionTime = 0; 
-  FUSION_MATH_TYPE lastDeltaYawRad = 0.0;
-  
+  unsigned long lastMagCheckTime = 0;
+  unsigned long lastSuccessfulCorrectionTime = 0;
+
   void complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
                                FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                FUSION_MATH_TYPE correction_dt);
