@@ -6,7 +6,7 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
-> **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, and a custom SPI/I2C pin-mapping example.
+> **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, FIFO overflow detection, burst FIFO reads (~18× fewer bus transactions), and a custom SPI/I2C pin-mapping example.
 
 ---
 
@@ -406,6 +406,33 @@ The IMU driver supports three reading modes:
 
 > **Note:** High-res mode is **automatically disabled on AVR** (Arduino Uno, Nano, Mega) to conserve RAM. It forces the accelerometer to ±16 G and gyroscope to ±2000 dps ranges.
 
+In 20-bit mode the packet's 20-bit field is the 16-bit sample shifted left by 4 with the extension nibble appended below it, so the effective sensitivity is 16× the 16-bit value: **32768 LSB/g** and **262.4 LSB/dps**.
+
+### 🚚 Burst FIFO Reads
+
+`readFIFO()` still returns one packet per call, but bytes are fetched from the sensor a **whole burst at a time**: a single `FIFO_COUNT` read plus one bulk `FIFO_DATA` read serve up to 32 packets (8 on AVR), which are then parsed from RAM with no further bus traffic. Draining a full 128-packet FIFO costs **~14 bus transactions instead of 256**.
+
+Faster draining directly reduces the chance of overflowing the FIFO in the first place. On I2C the bulk read is automatically split into Wire-buffer-sized chunks; the FIFO read pointer advances per byte, so packets still stream consecutively.
+
+### 🚨 FIFO Overflow Detection
+
+The hardware FIFO is 2 KB — **128 packets** at 16 bytes, or **102** at 20 bytes. At 8 kHz ODR it fills from empty in about **16 ms**. If your loop is slower than that, the sensor starts discarding samples, and a dropped packet is rotation that can never be integrated: a permanent, silently-accumulating attitude error.
+
+Worse, it hides. The per-sample `dt` is computed as *elapsed time ÷ packets actually read*, so if 160 samples were produced but only 128 were read, the timing still looks perfectly consistent while a quarter of the motion has vanished.
+
+The driver latches the hardware `FIFO_FULL` flag on every buffer refill and counts the events. **The library never prints anything** — poll it from your sketch:
+
+```cpp
+if (sensor.imu.fifoOverflowed()) {                  // self-clearing since last call
+  Serial.print("FIFO overflow! total=");
+  Serial.println(sensor.imu.getFIFOOverflowCount());
+}
+```
+
+The usual cause is a blocking `Serial.print` at a low baud rate. If you see overflows, raise the baud rate (921600), log binary, or lower the ODR.
+
+> `INT_STATUS` is read-to-clear, and the driver reads it once per FIFO refill. If your sketch also drives the INT pins and inspects `INT_STATUS` itself, the driver will have consumed the flags first.
+
 ---
 
 ## API Reference
@@ -437,6 +464,10 @@ The IMU driver supports three reading modes:
 | `setAccelFS(fs)` | Set accelerometer full-scale range |
 | `setGyroFS(fs)` | Set gyroscope full-scale range |
 | `setFIFOMode(mode)` | Select FIFO reading mode |
+| `flushFIFO()` | Discard all buffered samples (hardware and software) |
+| `fifoOverflowed()` | True if the FIFO overflowed since the last call (self-clearing) |
+| `getFIFOOverflowCount()` | Total overflow events since boot |
+| `resetFIFOOverflowCount()` | Clear the overflow counter and flag |
 | `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
 | `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
 | `readTemperature()` | Read internal IMU temperature |

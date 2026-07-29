@@ -5,7 +5,8 @@ ICM42688P::ICM42688P() {
   _gyroScaleFactor = 1.0f / 16.4f;
   _i2cAddr = ICM_ADDR_PRIMARY;
   _fifoMode = FIFO_NONE;
-  _debug = false; 
+  _fifoPacketSize = 16;
+  _debug = false;
   _csPin = -1;
 }
 
@@ -265,6 +266,8 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   #endif
 
   _fifoMode = mode;
+  _fifoPacketSize = (mode == FIFO_20BIT_HIRES) ? 20 : 16;
+  invalidateFIFOBuffer(); // Packets already buffered use the old packet layout
 
   // [VOLTINO FIX] First reset FIFO to bypass with empty configuration
   writeRegister(ICM42688_REG_FIFO_CONFIG, 0x00);
@@ -292,6 +295,75 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
 
 void ICM42688P::flushFIFO() {
   writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02);
+  invalidateFIFOBuffer(); // Drop software-buffered packets too - they are now stale
+}
+
+// ---------------------------------------------------------------------------
+// FIFO burst buffering + overflow monitoring
+// ---------------------------------------------------------------------------
+
+void ICM42688P::invalidateFIFOBuffer() {
+  _fifoBufCount = 0;
+  _fifoBufIndex = 0;
+}
+
+bool ICM42688P::fifoOverflowed() {
+  bool flagged = _fifoOverflowFlag;
+  _fifoOverflowFlag = false;
+  return flagged;
+}
+
+uint32_t ICM42688P::getFIFOOverflowCount() { return _fifoOverflowCount; }
+
+void ICM42688P::resetFIFOOverflowCount() {
+  _fifoOverflowCount = 0;
+  _fifoOverflowFlag = false;
+}
+
+// Bulk read of FIFO_DATA. The FIFO read pointer advances per byte, so on I2C the
+// transfer can safely be split into Wire-buffer-sized chunks and still stream
+// consecutive packets.
+void ICM42688P::readFIFOBytes(uint8_t *buf, size_t len) {
+  if (_bus == BUS_SPI) {
+    readRegisters(ICM42688_REG_FIFO_DATA, buf, len);
+  } else {
+    const size_t chunk = 30; // Conservative: fits AVR's 32-byte Wire buffer
+    size_t done = 0;
+    while (done < len) {
+      size_t n = ((len - done) < chunk) ? (len - done) : chunk;
+      readRegisters(ICM42688_REG_FIFO_DATA, buf + done, n);
+      done += n;
+    }
+  }
+}
+
+uint8_t ICM42688P::fillFIFOBuffer() {
+  invalidateFIFOBuffer();
+
+  if (_fifoPacketSize == 0) return 0; // Guard against a divide-by-zero
+
+  // Latch the hardware overflow flag. INT_STATUS is read-to-clear, so this is
+  // checked once per burst rather than once per packet.
+  uint8_t intStatus = readRegister(ICM42688_REG_INT_STATUS);
+  if (intStatus & ICM42688_BIT_FIFO_FULL) {
+    _fifoOverflowFlag = true;
+    if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
+  }
+
+  uint8_t countBuf[2];
+  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
+  uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
+
+  // A count above the physical FIFO size means a garbled read - discard it.
+  if (fifoBytes > ICM42688_FIFO_BYTES) return 0;
+
+  uint16_t packets = fifoBytes / _fifoPacketSize;
+  if (packets == 0) return 0;
+  if (packets > FIFO_BURST_PACKETS) packets = FIFO_BURST_PACKETS;
+
+  readFIFOBytes(_fifoBuf, (size_t)packets * _fifoPacketSize);
+  _fifoBufCount = (uint8_t)packets;
+  return _fifoBufCount;
 }
 
 void ICM42688P::setAccelOffset(float x, float y, float z) { accOffset[0] = x; accOffset[1] = y; accOffset[2] = z; }
@@ -361,16 +433,19 @@ bool ICM42688P::readSensorData(float& ax, float& ay, float& az, float& gx, float
 }
 
 bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  uint8_t countBuf[2];
-  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
-  uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
+  if (_fifoBufIndex >= _fifoBufCount) {
+    if (fillFIFOBuffer() == 0) return false;
+  }
 
-  if (fifoCount < 16) return false; 
+  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
+  _fifoBufIndex++;
 
-  uint8_t buffer[16];
-  readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
-
-  if ((buffer[0] & 0x80) != 0) return false; 
+  // Header bit 7 set marks an empty/message packet: the rest of the burst is
+  // not trustworthy, so drop it and resynchronise on the next call.
+  if ((buffer[0] & 0x80) != 0) {
+    invalidateFIFOBuffer();
+    return false;
+  }
 
   int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
   int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
@@ -392,16 +467,17 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
 // [VOLTINO FIX] PERFEKTNÍ 20-BIT PARSOVÁNÍ PODLE TDK DATASHEETU
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  uint8_t countBuf[2];
-  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
-  uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
+  if (_fifoBufIndex >= _fifoBufCount) {
+    if (fillFIFOBuffer() == 0) return false;
+  }
 
-  if (fifoCount < 20) return false; 
+  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
+  _fifoBufIndex++;
 
-  uint8_t buffer[20];
-  readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
-
-  if ((buffer[0] & 0x80) != 0) return false;
+  if ((buffer[0] & 0x80) != 0) {
+    invalidateFIFOBuffer();
+    return false;
+  }
 
   // Extrakce 20-bit hodnot podle TDK Packet 4 (Byte 17, 18, 19 sdílejí bity)
   // Byte 17 (0x11): Bity 7:4 = Gyro X [3:0], Bity 3:0 = Accel X [3:0]

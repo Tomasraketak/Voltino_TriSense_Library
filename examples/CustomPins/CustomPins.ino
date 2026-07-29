@@ -28,6 +28,7 @@
  *   - getGlobalLinearAcceleration() -> world-frame acceleration with gravity removed
  *   - getActualFusionHz()   -> measured update rate of the fusion loop
  *   - getMagHeadingDegrees() -> tilt-compensated magnetometer-only heading
+ *   - fifoOverflowed()      -> detect dropped IMU packets
  */
 
 #include <Arduino.h>
@@ -174,7 +175,15 @@ void loop() {
       Serial.print(" Y:"); Serial.print(glAy, 3);
       Serial.print(" Z:"); Serial.print(glAz, 3);
 
-      Serial.print(" | FusionHz:"); Serial.println(fusion.getActualFusionHz(), 1);
+      Serial.print(" | FusionHz:"); Serial.print(fusion.getActualFusionHz(), 1);
+
+      // Dropped FIFO packets are unrecoverable lost rotation - surface them.
+      if (sensor.imu.fifoOverflowed()) {
+        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(")");
+      }
+      Serial.println();
     }
   }
 }

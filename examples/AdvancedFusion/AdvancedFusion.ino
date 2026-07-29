@@ -1,7 +1,7 @@
 /*
- * Example: AdvancedFusion.ino (Updated for v1.2.0)
+ * Example: AdvancedFusion.ino (Updated for v1.3.0)
  * Advanced sensor fusion (Complementary Filter with Gaussian confidence)
- * Features dynamic FIFO draining and ODR drift tracking.
+ * Features dynamic FIFO draining and an MCU-clocked adaptive timebase.
  * * HW: Raspberry Pi Pico 2 / ESP32 + Voltino TriSense
  */
 
@@ -43,7 +43,13 @@ void setup() {
     {-0.002, 0.139, 1.077}
   };
   fusion.setMagSoftIron(softIron);
-  fusion.setDeclination(5.6); 
+  fusion.setDeclination(5.6);
+
+  // Learn the gyro's resting drift while running. The learned bias is bounded
+  // (setMaxGyroBias, default 5 dps) so a bad magnetometer correction can't
+  // wind the integrator up indefinitely.
+  fusion.setDynamicGyroBias(true, 0.0001f);
+  fusion.setMaxGyroBias(5.0f);
 
   Serial.println("Calibrating initial orientation...");
   fusion.initOrientation();
@@ -63,7 +69,19 @@ void loop() {
       
       Serial.print("Roll: "); Serial.print(roll, 1);
       Serial.print(" | Pitch: "); Serial.print(pitch, 1);
-      Serial.print(" | Yaw: "); Serial.println(yaw, 1);
+      Serial.print(" | Yaw: "); Serial.print(yaw, 1);
+
+      // Magnetometer-only heading, for comparison against the fused yaw above.
+      Serial.print(" | Yaw(mag only): "); Serial.print(fusion.getMagHeadingDegrees(), 1);
+      Serial.print(" | "); Serial.print(fusion.getActualFusionHz(), 0); Serial.print(" Hz");
+
+      // Dropped FIFO packets are unrecoverable lost rotation - surface them.
+      if (sensor.imu.fifoOverflowed()) {
+        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(")");
+      }
+      Serial.println();
     }
   }
 }
