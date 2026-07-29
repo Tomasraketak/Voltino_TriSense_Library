@@ -276,6 +276,13 @@ void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, Acce
   }
 }
 
+// World-frame acceleration with gravity removed (i.e. getGlobalAcceleration() minus the
+// world-frame gravity vector) — this is the quantity to double-integrate for dead reckoning.
+void TriSenseFusion::getGlobalLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
+  getGlobalAcceleration(ax, ay, az, unit);
+  az -= (unit == ACCEL_UNIT_MS2) ? _localGravity : 1.0f;
+}
+
 void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
   FUSION_MATH_TYPE grav_x = 2.0 * (qx * qz - qw * qy);

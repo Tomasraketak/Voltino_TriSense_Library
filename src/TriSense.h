@@ -178,9 +178,10 @@ public:
   
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  void setLocalGravity(float g); 
+  void setLocalGravity(float g);
   void getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   void getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
+  void getGlobalLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   
   void setDynamicGyroBias(bool enable, float ki = 0.0001f);
   void setAccelGaussian(float ref, float sigma);
