@@ -33,7 +33,8 @@
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
 
-#define ICM42688_BIT_FIFO_FULL 0x02 // INT_STATUS: FIFO_FULL_INT
+// Bit 1 in both INT_STATUS (FIFO_FULL_INT) and INT_SOURCE0 (FIFO_FULL_INT1_EN).
+#define ICM42688_BIT_FIFO_FULL 0x02
 
 // Hardware FIFO is 2 KB: 128 x 16-byte packets, or 102 x 20-byte packets.
 #define ICM42688_FIFO_BYTES 2048

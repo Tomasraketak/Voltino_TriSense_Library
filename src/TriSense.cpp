@@ -110,6 +110,31 @@ void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
   }
 }
 
+// Hard iron is a fixed offset in the sensor's physical axes and soft iron a
+// linear distortion in those same axes - both are properties of the sensor and
+// whatever magnetic junk is mounted next to it. So they must be removed while
+// the reading is still in sensor axes; only the corrected, physically-real
+// field vector may then be rotated into the mount frame.
+//
+// Doing it the other way round (remap first) silently applies each hard-iron
+// offset to the wrong axis for every orientation except ORIENTATION_Z_UP, where
+// remapAxes() happens to be the identity. The result is an off-centre locus in
+// the horizontal plane, which makes heading sensitivity vary with direction.
+void TriSenseFusion::applyMagCalibration(float rawX, float rawY, float rawZ,
+                                         FUSION_MATH_TYPE& mx, FUSION_MATH_TYPE& my, FUSION_MATH_TYPE& mz) {
+  FUSION_MATH_TYPE hx = (FUSION_MATH_TYPE)rawX - magHardIron[0];
+  FUSION_MATH_TYPE hy = (FUSION_MATH_TYPE)rawY - magHardIron[1];
+  FUSION_MATH_TYPE hz = (FUSION_MATH_TYPE)rawZ - magHardIron[2];
+
+  float cx = (float)(magSoftIron[0][0]*hx + magSoftIron[0][1]*hy + magSoftIron[0][2]*hz);
+  float cy = (float)(magSoftIron[1][0]*hx + magSoftIron[1][1]*hy + magSoftIron[1][2]*hz);
+  float cz = (float)(magSoftIron[2][0]*hx + magSoftIron[2][1]*hy + magSoftIron[2][2]*hz);
+
+  remapAxes(cx, cy, cz); // Rotate the CALIBRATED vector into the mount frame
+
+  mx = (FUSION_MATH_TYPE)cx; my = (FUSION_MATH_TYPE)cy; mz = (FUSION_MATH_TYPE)cz;
+}
+
 void TriSenseFusion::setDynamicGyroBias(bool enable, float ki) { _dynamicBiasEnabled = enable; _biasKi = ki; }
 void TriSenseFusion::setMaxGyroBias(float maxDps) { _maxGyroBiasDps = (maxDps < 0.0f) ? -maxDps : maxDps; }
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) { accRef = ref; accSigma = sigma; }
@@ -190,18 +215,10 @@ void TriSenseFusion::initOrientation(int samples) {
          FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
          axSum+=ax; aySum+=ay; azSum+=az;
          
-         float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-         remapAxes(mxr, myr, mzr);
-         
-         FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-         FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-         FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-         
-         FUSION_MATH_TYPE mx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-         FUSION_MATH_TYPE my = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-         FUSION_MATH_TYPE mz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
-         
-         mxSum+=mx; mySum+=my; mzSum+=mz; 
+         FUSION_MATH_TYPE mx, my, mz;
+         applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+
+         mxSum+=mx; mySum+=my; mzSum+=mz;
          count++; 
      } else {
          delay(1); 
@@ -561,14 +578,7 @@ bool AdvancedTriFusion::update() {
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-          remapAxes(mxr, myr, mzr);
-          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
@@ -657,14 +667,7 @@ bool AdvancedTriFusion::update() {
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-          remapAxes(mxr, myr, mzr);
-          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;

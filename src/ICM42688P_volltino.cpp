@@ -286,11 +286,20 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
     // HIRES_EN + ACCEL_EN + GYRO_EN (all 3 bits required!)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);  
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
-  
-  enforceBandwidthLimit(); 
+
+  if (mode != FIFO_NONE) {
+    // Enable the FIFO_FULL condition so it latches in INT_STATUS and overflow
+    // becomes detectable. Read-modify-write leaves the data-ready routing alone.
+    // This also makes the INT1 pin pulse on FIFO full, which is harmless when
+    // the pin is unused.
+    uint8_t intSource = readRegister(ICM42688_REG_INT_SOURCE0);
+    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_BIT_FIFO_FULL);
+  }
+
+  enforceBandwidthLimit();
 }
 
 void ICM42688P::flushFIFO() {
@@ -342,13 +351,14 @@ uint8_t ICM42688P::fillFIFOBuffer() {
 
   if (_fifoPacketSize == 0) return 0; // Guard against a divide-by-zero
 
-  // Latch the hardware overflow flag. INT_STATUS is read-to-clear, so this is
-  // checked once per burst rather than once per packet.
+  bool overflow = false;
+
+  // Detector 1: the hardware's latched FIFO_FULL flag. INT_STATUS is
+  // read-to-clear, so it is checked once per burst rather than once per packet.
+  // This only reports anything because setFIFOMode() enables FIFO_FULL in
+  // INT_SOURCE0 - the status bit does not latch for a disabled source.
   uint8_t intStatus = readRegister(ICM42688_REG_INT_STATUS);
-  if (intStatus & ICM42688_BIT_FIFO_FULL) {
-    _fifoOverflowFlag = true;
-    if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
-  }
+  if (intStatus & ICM42688_BIT_FIFO_FULL) overflow = true;
 
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
@@ -356,6 +366,17 @@ uint8_t ICM42688P::fillFIFOBuffer() {
 
   // A count above the physical FIFO size means a garbled read - discard it.
   if (fifoBytes > ICM42688_FIFO_BYTES) return 0;
+
+  // Detector 2: config-free backstop. A count within one packet of the 2 KB
+  // capacity means the FIFO is saturated, so samples are being dropped (or are
+  // about to be). This needs no interrupt configuration at all, and therefore
+  // still works if INT_SOURCE0 is overwritten by the sketch.
+  if ((uint32_t)fifoBytes + _fifoPacketSize > ICM42688_FIFO_BYTES) overflow = true;
+
+  if (overflow) {
+    _fifoOverflowFlag = true;
+    if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
+  }
 
   uint16_t packets = fifoBytes / _fifoPacketSize;
   if (packets == 0) return 0;

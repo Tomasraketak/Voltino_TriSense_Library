@@ -114,6 +114,13 @@ protected:
   TriSenseOrientation _mountOrientation = ORIENTATION_Z_UP;
   void remapAxes(float& x, float& y, float& z);
 
+  // Applies hard-iron then soft-iron in the magnetometer's OWN axes, and only
+  // then remaps into the mount frame. The order is not interchangeable: a
+  // MotionCal fit is derived from raw sensor axes, so applying it after a remap
+  // feeds each offset to the wrong axis.
+  void applyMagCalibration(float rawX, float rawY, float rawZ,
+                           FUSION_MATH_TYPE& mx, FUSION_MATH_TYPE& my, FUSION_MATH_TYPE& mz);
+
   // VOLTINO UPDATE: Variables for tracking actual Fusion Hz
   unsigned long _lastHzCheckTime = 0;
   uint32_t _updateCount = 0;

@@ -414,13 +414,36 @@ In 20-bit mode the packet's 20-bit field is the 16-bit sample shifted left by 4 
 
 Faster draining directly reduces the chance of overflowing the FIFO in the first place. On I2C the bulk read is automatically split into Wire-buffer-sized chunks; the FIFO read pointer advances per byte, so packets still stream consecutively.
 
+### 🧭 Magnetometer Calibration Order
+
+Hard iron is a fixed offset in the magnetometer's **own physical axes**, and soft iron a linear distortion in those same axes — both are properties of the sensor and whatever magnetic material sits next to it. MotionCal therefore fits them in raw sensor axes, and the library removes them **before** `setMountOrientation()`'s axis remapping. Only the corrected, physically-real field vector is rotated into the mount frame.
+
+The order is not interchangeable. Remapping first applies each hard-iron offset to the wrong axis for every orientation except `ORIENTATION_Z_UP` (where the remap is the identity), leaving a residual constant offset in the horizontal plane. That off-centres the heading locus, so heading sensitivity varies with direction — a given rotation reads too large in one sector and too small in the opposite one. If the residual offset exceeds the horizontal field strength (~20 µT in central Europe), the locus stops enclosing the origin and heading cannot sweep a full 360° at all.
+
+To sanity-check a calibration, print the corrected field magnitude while rotating the board:
+
+```cpp
+float m = sqrt(fusion.lastMx*fusion.lastMx +
+               fusion.lastMy*fusion.lastMy +
+               fusion.lastMz*fusion.lastMz);
+```
+
+It should stay near-constant in every orientation, at your location's total field strength (~48–49 µT in Prague). A magnitude that swings with attitude means the calibration has not converged.
+
 ### 🚨 FIFO Overflow Detection
 
 The hardware FIFO is 2 KB — **128 packets** at 16 bytes, or **102** at 20 bytes. At 8 kHz ODR it fills from empty in about **16 ms**. If your loop is slower than that, the sensor starts discarding samples, and a dropped packet is rotation that can never be integrated: a permanent, silently-accumulating attitude error.
 
 Worse, it hides. The per-sample `dt` is computed as *elapsed time ÷ packets actually read*, so if 160 samples were produced but only 128 were read, the timing still looks perfectly consistent while a quarter of the motion has vanished.
 
-The driver latches the hardware `FIFO_FULL` flag on every buffer refill and counts the events. **The library never prints anything** — poll it from your sketch:
+Two independent detectors run on every buffer refill, and either one raises the flag:
+
+1. The hardware's latched `FIFO_FULL` bit in `INT_STATUS`. `setFIFOMode()` enables `FIFO_FULL_INT1_EN` in `INT_SOURCE0` so the bit actually latches — the status bit does **not** latch for a disabled source, so without that write this detector reports nothing. (It also makes the INT1 pin pulse on FIFO full, harmless when the pin is unused.)
+2. A config-free backstop: a FIFO count within one packet of the 2 KB capacity means the buffer is saturated. This needs no interrupt configuration and keeps working even if a sketch overwrites `INT_SOURCE0`.
+
+Because detector 2 fires at saturation, it can flag one sample before the first packet is actually lost — treat the warning as "the FIFO hit its limit", which is the actionable condition either way.
+
+**The library never prints anything** — poll it from your sketch:
 
 ```cpp
 if (sensor.imu.fifoOverflowed()) {                  // self-clearing since last call
