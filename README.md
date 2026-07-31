@@ -391,6 +391,58 @@ Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` 
 
 ---
 
+## Rocket Navigator (`examples/RocketPropulsiveLanding`)
+
+The rocket-specific sibling of the above, for an amateur propulsively-landed solid-motor vehicle: boost to 100–250 m, coast, descend, relight a motor and land on it. Same cascade, retuned around a flight profile that breaks most of what a ground-vehicle navigator assumes.
+
+> **This sketch estimates state. It does not fly the rocket and it fires nothing.** `onLandingBurnGo()` is an empty hook. Pyro command needs an arming switch, continuity checks, interlocks and ground testing that don't belong in an example.
+
+### The one that matters most: ZUPT is state-gated
+
+The general sketch declares a standstill when |accel| ≈ 1 g and the gyro is quiet. **A rocket at terminal velocity reads exactly 1 g with a quiet gyro** — drag balancing weight is what terminal velocity *means*. An ungated zero-velocity update would pin the velocity estimate to zero while falling at 30 m/s, and the landing burn would be solved from it. ZUPT here is permitted only in `PAD` and `LANDED`.
+
+### The two axes have different sensor hierarchies
+
+Worked for a 3.2 kg vehicle on a 270 Ns / 200 N / 1.7 s motor — 6.4 g peak, burnout ~68 m/s at ~58 m, apogee ~250 m at T+8.6 s:
+
+| attitude error | vertical accel error | **lateral** accel error | drift by apogee |
+|---|---|---|---|
+| 0.5° | 0.004 m/s² | 0.43 m/s² | 16 m |
+| 1.0° | 0.007 m/s² | 0.87 m/s² | **32 m** |
+| 2.0° | 0.030 m/s² | 1.73 m/s² | **64 m** |
+
+Attitude error barely touches the vertical axis but projects the whole thrust vector sideways. So:
+
+- **Vertical is baro-led.** A differential barometer referenced to the pad, differentiated by the Kalman filter into climb rate — the number the landing burn is solved from.
+- **Horizontal is GPS-led, and that is not optional.** Dead reckoning cannot hold position through the table above. 8.6 s of ascent is ~86 fixes at 10 Hz, each an absolute, non-drifting reference. **GPS is used through the entire flight**, de-weighted by phase rather than switched off.
+
+**GPS altitude is kept in flight too**, because the two vertical sources fail differently. Static-port error makes the barometer read high and grows with v² — worst at burnout, at 68 m/s. GPS altitude is noisy (5–10 m) but has *no airspeed term*, so it is applied as a second loose measurement whose job is to stop the baro's dynamic bias from integrating into the apogee estimate.
+
+What GPS still can't do: NMEA carries no vertical velocity, and 150 ms of latency is 6 m/s of error during a 40 m/s² boost. Nothing depends on a fix arriving — every source is quality-gated, and outages are counted and reported after the flight.
+
+### Other rocket-specific changes
+
+| Change | Why |
+|---|---|
+| Baro trust scheduled on v² and phase | Static-port error grows with airspeed; motor plume pressurizes the base |
+| Accel bias frozen outside PAD/LANDED, hard-clamped | At 6 g the bias state would absorb *scale-factor* error, which is wrong the moment the motor stops |
+| Mag correction off during motor burns | Igniter current and a steel casing move the local field |
+| Process noise scheduled per phase | 2.5 m/s²/√Hz under thrust vs 0.10 on the pad |
+| 20-bit FIFO at 4 kHz | Pins ±16 g / ±2000 dps, and gives 16× resolution in the near-zero-g coast |
+| Flight recorder in RAM | ~40 s at 100 Hz (~144 KB), including pre-launch; freezes after touchdown so the flight can't be overwritten while the rocket sits in a field |
+
+**Attitude correction switches itself off, and that is correct.** `AdvancedTriFusion` gates the accelerometer with a Gaussian centred on 1 g (σ 0.05). At 6 g of boost and at ~0 g in coast that gain is numerically zero, so attitude is pure gyro integration exactly when the accelerometer is not measuring gravity. This needs no configuration and is the single most useful property of the library for rocketry.
+
+### Mounting
+
+Set `ROCKET_MOUNT` so that **after** the library's axis remap, **+Z points up the rocket**. Launch detection, burnout detection and saturation checks all read the axial channel as the remapped Z, so getting this wrong breaks all of them at once.
+
+### Runtime keys
+
+`p` dump flight log as CSV · `Z` force-freeze the log · `z` reset filter and recorder · `d` raw NMEA · `h` help
+
+---
+
 ## Calibration Guide
 
 To achieve professional-grade results, calibrate the sensors.
