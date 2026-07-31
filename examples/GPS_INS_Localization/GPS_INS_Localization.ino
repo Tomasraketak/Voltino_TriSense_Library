@@ -179,9 +179,25 @@ static float MAG_SOFT_IRON[3][3] = {
  */
 #define YAW_IS_COMPASS_HEADING 1
 
-// ---- Rates ------------------------------------------------------------------
-#define NAV_RATE_HZ           100      // Kalman predict rate
-#define BARO_RATE_HZ          25       // Barometer read rate (I2C traffic)
+/*
+ * ---- Rates ------------------------------------------------------------------
+ *
+ * Everything runs at the barometer's maximum, 240 Hz, because there is no reason
+ * not to. A Kalman step here is three axes of 3x3 covariance propagation plus a
+ * frame rotation - about 800 cycles including the Euler extraction. At 240 Hz on
+ * a 150 MHz M33 that is 0.13% of one core. Running slower would buy nothing and
+ * cost measurement latency: a barometer sample that arrives between steps cannot
+ * be applied until the next one, and at 100 Hz that is up to 10 ms of lag on the
+ * altitude channel for no reason at all.
+ *
+ * Matching the two rates also means every barometer sample the sensor produces
+ * gets used exactly once. See setup() for why the hardware IIR filter is then
+ * switched off: with no decimation there is nothing to alias, and the Kalman
+ * filter is a better smoother than a first-order IIR because it knows the
+ * measurement's variance and the vehicle's dynamics.
+ */
+#define NAV_RATE_HZ           240      // Kalman predict rate
+#define BARO_RATE_HZ          240      // Barometer read rate = its full ODR
 #define TELEMETRY_HZ          10       // Serial output rate
 
 /*
@@ -218,14 +234,46 @@ static float MAG_SOFT_IRON[3][3] = {
 #define ACC_PSD_VERT          0.35f    // vertical also absorbs baro noise
 #define ACC_BIAS_RW           0.004f   // m/s^2/sqrt(s), bias random walk
 
-// Measurement noise.
-#define GPS_UERE_M            2.2f     // sigma_position = GPS_UERE_M * HDOP   [m]
-#define GPS_VEL_SIGMA         0.25f    // sigma_velocity at HDOP 1           [m/s]
-// BARO_ALT_SIGMA is dominated by the ATMOSPHERE, not by the BMP580: with the
-// oversampling set in setup() the sensor contributes ~4 cm, while wind gusts,
-// prop wash and opening a car door contribute decimetres. Raise it if altitude
-// looks twitchy on your platform; lower it only inside a shielded static port.
-#define BARO_ALT_SIGMA        0.6f     // short-term barometric altitude noise [m]
+/*
+ * Measurement noise.
+ *
+ *      sigma_position = GPS_UERE_M   * HDOP * trust(accel)   [m]
+ *      sigma_velocity = GPS_VEL_SIGMA * HDOP * trust(accel)  [m/s]
+ *
+ * HDOP is the dominant term and enters LINEARLY - that is what a dilution of
+ * precision means. Across its usable 0.8 to GPS_MAX_HDOP range it can swing the
+ * sigma by 7x on its own, which is exactly why a fixed-gain filter cannot do
+ * this job and a Kalman filter can.
+ *
+ * On top of it, sigma is inflated once measured specific force passes the knee.
+ * High acceleration is when fix latency hurts most - 150 ms at 4 m/s^2 is
+ * 0.6 m/s of velocity error, and it scales linearly - and it is also when a
+ * receiver's tracking loops are under the most stress. Driving this from the
+ * MEASURED acceleration rather than from a mode flag keeps it continuous and
+ * means it needs no knowledge of what the vehicle is doing.
+ *
+ * The default 2 g knee is loose enough that ordinary driving, walking and boat
+ * motion never trip it. Lower it if you see GPS fighting the filter under hard
+ * acceleration; raise it for a platform that lives at high g.
+ */
+#define GPS_UERE_M            2.2f     // m of horizontal error per unit HDOP
+#define GPS_VEL_SIGMA         0.25f    // m/s at HDOP 1. Doppler-derived, hence small
+#define GPS_ACCEL_KNEE_G      2.0f     // no extra de-weighting below this
+#define GPS_ACCEL_SLOPE       1.0f     // sigma multiplier added per g above it
+#define GPS_ACCEL_MAX_MULT    6.0f     // cap on the multiplier
+/*
+ * BARO_ALT_SIGMA is set from the ATMOSPHERE, not from the BMP580's noise figure,
+ * and that is deliberate. Per sample the sensor contributes ~11 cm at the
+ * oversampling used in setup(), and at 240 Hz that part averages down fast. What
+ * does NOT average down is the air: wind gusts, prop wash, a passing vehicle,
+ * opening a car door. That noise is correlated over seconds, so more samples do
+ * not help, and quoting the sensor's figure here would make the filter
+ * over-confident in altitude and slow to accept a GPS correction.
+ *
+ * Raise it if altitude looks twitchy on your platform; lower it only if the
+ * static port is genuinely shielded.
+ */
+#define BARO_ALT_SIGMA        0.5f     // short-term barometric altitude noise [m]
 #define ZUPT_VEL_SIGMA        0.02f    // how hard a detected standstill pins v [m/s]
 
 // Innovation gate, in sigma. A measurement further than this from the prediction
@@ -560,11 +608,24 @@ static bool takeGpsFix(GpsFix &out) {
   return fresh;
 }
 
-static void applyGpsFix(const GpsFix &fix, float yawDeg) {
+// GPS sigma multiplier from measured specific force, in g. See the note on
+// GPS_ACCEL_KNEE_G above. Free fall and steady cruise both read benignly, so this
+// only bites when the vehicle is genuinely being thrown around.
+static float gpsAccelTrust(float accelG) {
+  if (accelG <= GPS_ACCEL_KNEE_G) return 1.0f;
+  const float m = 1.0f + GPS_ACCEL_SLOPE * (accelG - GPS_ACCEL_KNEE_G);
+  return (m > GPS_ACCEL_MAX_MULT) ? (float)GPS_ACCEL_MAX_MULT : m;
+}
+
+// accelG is the measured specific force magnitude, driving the dynamic trust
+// multiplier; aN/aE age the GPS velocity forward over the fix's latency.
+static void applyGpsFix(const GpsFix &fix, float yawDeg,
+                        float aN, float aE, float accelG) {
   if (fix.sats < GPS_MIN_SATS || fix.hdop > GPS_MAX_HDOP) return;
 
   const uint32_t nowMs = millis();
   const float    hdop  = fix.hdop < 0.8f ? 0.8f : fix.hdop;
+  const float    mult  = gpsAccelTrust(accelG);
 
   if (!originSet) {
     const float alt0 = fix.haveAlt ? fix.altMSL : lastBaroAlt;
@@ -591,7 +652,7 @@ static void applyGpsFix(const GpsFix &fix, float yawDeg) {
   zN += kfN.x[1] * lag;
   zE += kfE.x[1] * lag;
 
-  const float sigP = GPS_UERE_M * hdop;
+  const float sigP = GPS_UERE_M * hdop * mult;
   const float Rpos = sigP * sigP;
 
   const bool okN = kfCorrect(kfN, 0, zN, Rpos, GATE_SIGMA);
@@ -609,10 +670,12 @@ static void applyGpsFix(const GpsFix &fix, float yawDeg) {
 
   if (fix.haveVel) {
     const float cr = fix.courseDeg * DEG2RAD;
-    const float sv = GPS_VEL_SIGMA * hdop;
+    const float sv = GPS_VEL_SIGMA * hdop * mult;
     const float Rv = sv * sv;
-    kfCorrect(kfN, 1, fix.speedMps * cosf(cr), Rv, GATE_SIGMA);
-    kfCorrect(kfE, 1, fix.speedMps * sinf(cr), Rv, GATE_SIGMA);
+    // Aged forward by the acceleration the IMU measured during the fix's latency,
+    // the same way the position measurement above is aged forward by velocity.
+    kfCorrect(kfN, 1, fix.speedMps * cosf(cr) + aN * lag, Rv, GATE_SIGMA);
+    kfCorrect(kfE, 1, fix.speedMps * sinf(cr) + aE * lag, Rv, GATE_SIGMA);
 
     // Heading-sense diagnostic. Under straight-line motion a vehicle's heading
     // and its course over ground agree; whichever reading of yaw tracks GPS
@@ -753,15 +816,17 @@ static void navStep(float dt) {
   }
 
   // --- 5. GPS -----------------------------------------------------------------
+  // Specific force magnitude, in g. Drives the dynamic GPS trust multiplier, and
+  // is reused by the standstill detector below.
+  const float amag = sqrtf((float)(fusion.lastAx * fusion.lastAx +
+                                   fusion.lastAy * fusion.lastAy +
+                                   fusion.lastAz * fusion.lastAz));
   GpsFix fix;
-  if (takeGpsFix(fix)) applyGpsFix(fix, yaw);
+  if (takeGpsFix(fix)) applyGpsFix(fix, yaw, aN, aE, amag);
 
   // --- 6. Zero-velocity update ------------------------------------------------
   // Cheap, and the single most effective thing in this filter: standing still is
   // the only condition under which the accelerometer bias is directly visible.
-  const float amag = sqrtf((float)(fusion.lastAx * fusion.lastAx +
-                                   fusion.lastAy * fusion.lastAy +
-                                   fusion.lastAz * fusion.lastAz));
   const float gmag = fabsf((float)fusion.lastGx) +
                      fabsf((float)fusion.lastGy) +
                      fabsf((float)fusion.lastGz);
@@ -801,27 +866,31 @@ void setup() {
   // barometer reads stay a rounding error on core 0's budget.
   sensor.bmp.setI2CSpeed(400000);
 
-  // Barometer tuned for navigation rather than weather logging. Configuration
-  // registers only latch reliably in standby, so bracket the writes.
-  //
-  //   OSR x8 on pressure  -> roughly 4 cm RMS of sensor noise, vs ~11 cm at x2
-  //   ODR 50 Hz           -> 2x the 25 Hz read rate, so no aliasing
-  //   IIR coefficient 1   -> light anti-alias filter, ~20 ms of group delay
-  //
-  // This deliberately trades rate for per-sample noise, which is the OPPOSITE of
-  // what RocketPropulsiveLanding.ino does with the same sensor. A ground vehicle
-  // has slow vertical dynamics, so low noise is worth more than bandwidth; a
-  // rocket needs the driver's full 240 Hz because altitude lag turns into
-  // landing-burn error. Same part, different right answer.
-  //
-  // Also deliberately NOT filtered harder: the Kalman filter is the smoother
-  // here, and it does that job better when handed a low-latency measurement with
-  // an honestly stated sigma than a pre-smoothed, laggy one.
+  /*
+   * Barometer at the driver's maximum rate, read at that same rate, with the
+   * hardware filter OFF.
+   *
+   *   ODR 240 Hz  -> the highest BMP580_ODR exposes, and BARO_RATE_HZ matches it,
+   *                  so every sample the sensor produces is used exactly once
+   *   OSR x2      -> the only oversampling that sustains 240 Hz. Per sample that
+   *                  is ~11 cm of noise against ~4 cm at x8, but 240 Hz delivers
+   *                  ~10x the samples, and uncorrelated noise averages down as
+   *                  sqrt(N) inside the filter. The trade is worth taking.
+   *   IIR OFF     -> an IIR filter exists to stop content above Nyquist aliasing
+   *                  when you sample slower than the ODR. Sampling AT the ODR
+   *                  means there is nothing to alias. Leaving it on would only
+   *                  add group delay and, worse, correlate consecutive samples -
+   *                  and feeding correlated measurements to a Kalman filter at
+   *                  full rate makes it over-confident, because it counts each
+   *                  one as independent evidence.
+   *
+   * Config registers only latch reliably in standby, so bracket the writes.
+   */
   sensor.bmp.setPowerMode(BMP580_MODE_STANDBY);
   delay(5);
-  sensor.bmp.setOversampling(BMP580_OSR_x8, BMP580_OSR_x1);
-  sensor.bmp.setODR(BMP580_ODR_50p1Hz);
-  sensor.bmp.setIIRFilter(BMP580_IIR_1, BMP580_IIR_OFF);
+  sensor.bmp.setOversampling(BMP580_OSR_x2, BMP580_OSR_x2);
+  sensor.bmp.setODR(BMP580_ODR_240Hz);
+  sensor.bmp.setIIRFilter(BMP580_IIR_OFF, BMP580_IIR_OFF);
   sensor.bmp.setPowerMode(BMP580_MODE_NORMAL);
   delay(20);
 

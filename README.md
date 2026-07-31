@@ -351,7 +351,7 @@ The `GPS_INS_Localization` example does exactly that on a **Raspberry Pi Pico 2 
 | Stage | Estimator | Rate | Inputs |
 |-------|-----------|------|--------|
 | **Attitude** | `AdvancedTriFusion` (adaptive complementary filter) | IMU ODR | gyro, accel, mag |
-| **Navigation** | Linear Kalman filter, `x = [position, velocity, accel-bias]` per axis | 100 Hz | world-frame accel, GPS position, GPS velocity, baro altitude, ZUPT |
+| **Navigation** | Linear Kalman filter, `x = [position, velocity, accel-bias]` per axis | 240 Hz | world-frame accel, GPS position, GPS velocity, baro altitude, ZUPT |
 
 **Why not a 15-state ESKF?** An error-state Kalman filter is the textbook answer and genuinely wins in one regime: long GNSS outages under high dynamics, where the filter must recover *heading* from GPS. It also costs a 15×15 covariance propagation every step. Here the magnetometer already observes heading and the accelerometer already observes tilt, so that coupling buys very little — while the cascade costs a small fraction of the arithmetic and is far easier to tune. Fly a fast fixed-wing with no usable magnetometer and you should upgrade; for rovers, boats, cars, drones and trackers the cascade is the better trade.
 
@@ -363,12 +363,14 @@ The `GPS_INS_Localization` example does exactly that on a **Raspberry Pi Pico 2 
 
 | Source | Corrects | Notes |
 |--------|----------|-------|
-| GPS position | N/E position | σ = `GPS_UERE_M × HDOP`; extrapolated forward by `GPS_LATENCY_S` using the filter's own velocity, because an NMEA fix describes where you *were* |
-| GPS velocity | N/E velocity | from RMC speed + course; ignored below `GPS_COURSE_MIN_MPS`, where course over ground is noise |
-| Barometer | altitude | tight σ, short-term. The baro-to-GPS offset is tracked with a `BARO_TRACK_TAU_S` time constant, so altitude comes from the baro and the *datum* comes from GPS |
+| GPS position | N/E position | σ = `GPS_UERE_M × HDOP × trust(accel)`; extrapolated forward by `GPS_LATENCY_S` using the filter's own velocity, because an NMEA fix describes where you *were* |
+| GPS velocity | N/E velocity | from RMC speed + course — Doppler-derived, so more accurate than GPS position *and* independent of the INS drift it corrects. Ignored below `GPS_COURSE_MIN_MPS`, where course over ground is noise, and aged forward by measured acceleration |
+| Barometer | altitude | tight σ, short-term — the primary altitude source. The baro-to-GPS offset is tracked with a `BARO_TRACK_TAU_S` time constant, so altitude comes from the baro and only the *datum* comes from GPS, whose vertical error is several times its horizontal |
 | ZUPT | all three velocities | standing still is the only condition under which accelerometer bias is directly observable — without it a parked vehicle slowly "drives away" between fixes |
 
 Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` consecutive rejections are taken to mean the *filter* is wrong, and it re-anchors on GPS.
+
+**GPS trust is driven by HDOP and measured acceleration.** HDOP is the dominant term and enters linearly — that is what a dilution of precision *is*, and across its usable range it swings σ by 7× on its own. This is precisely the job a fixed-gain complementary filter cannot do. On top of it, σ inflates once measured specific force passes `GPS_ACCEL_KNEE_G` (default 2 g), because high acceleration is both when fix latency hurts most and when a receiver's tracking loops are under the most stress. Driving this from *measured* acceleration rather than a mode flag keeps it continuous and needs no knowledge of what the vehicle is doing.
 
 ### RP2350-specific optimizations
 
@@ -376,6 +378,8 @@ Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` 
 - **Core 0 never blocks.** Cross-core state moves through two mutex-protected structs, and the real-time core only ever uses `mutex_try_enter()`; a missed handoff is retried 10 ms later.
 - **Single precision everywhere.** The Cortex-M33 has a single-precision FPU but no double-precision unit, so every `double` is a software call. Doubles appear only in latitude/longitude handling (float would quantize position to ~0.4 m), a handful of times per fix. All libm calls are `f`-suffixed — the unsuffixed versions silently promote to double.
 - **2 kHz IMU ODR** instead of the 8 kHz default: attitude bandwidth beyond a few hundred Hz is worthless for navigation, and the spare cycles become headroom.
+- **Everything else runs at the barometer's full 240 Hz** — the Kalman filter, and the barometer read that feeds it. A Kalman step is three axes of 3×3 covariance propagation plus a frame rotation, about 800 cycles, so 240 Hz costs **0.13% of one core**. Running slower would buy nothing and cost measurement latency: a sample arriving between steps waits for the next one.
+- **The barometer's hardware IIR filter is off.** An IIR exists to stop content above Nyquist aliasing when you sample slower than the ODR — sampling *at* the ODR means there is nothing to alias. Leaving it on would add group delay and, worse, correlate consecutive samples, and feeding correlated measurements to a Kalman filter at full rate makes it over-confident because it counts each as independent evidence. `BARO_ALT_SIGMA` is likewise set from the *atmosphere* (gusts, prop wash, a passing vehicle — correlated over seconds, so it does not average down) rather than from the sensor's noise figure, which does.
 - **The L76K is told to emit GGA + RMC only** (`$PCAS03`). Together they carry everything TinyGPSPlus parses; GSV alone can be four sentences per epoch. PCAS checksums are computed at runtime, so no hand-calculated `*19` constants.
 - **One fix per NMEA epoch.** The filter is updated when RMC closes the epoch, not on every sentence — publishing per-sentence feeds the same measurement in twice and makes the filter over-confident.
 
@@ -388,64 +392,6 @@ Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` 
 ### Runtime keys
 
 `d` raw NMEA · `v` CSV output · `z` reset the navigation filter · `r` 10 Hz GNSS · `s` 1 Hz GNSS · `h` help
-
----
-
-## Rocket Navigator (`examples/RocketPropulsiveLanding`)
-
-The rocket-specific sibling of the above, for an amateur propulsively-landed solid-motor vehicle: boost to 100–250 m, coast, descend, relight a motor and land on it. Same cascade, retuned around a flight profile that breaks most of what a ground-vehicle navigator assumes.
-
-> **This sketch estimates state. It does not fly the rocket and it fires nothing.** `onLandingBurnGo()` is an empty hook. Pyro command needs an arming switch, continuity checks, interlocks and ground testing that don't belong in an example.
-
-### The one that matters most: ZUPT is state-gated
-
-The general sketch declares a standstill when |accel| ≈ 1 g and the gyro is quiet. **A rocket at terminal velocity reads exactly 1 g with a quiet gyro** — drag balancing weight is what terminal velocity *means*. An ungated zero-velocity update would pin the velocity estimate to zero while falling at 30 m/s, and the landing burn would be solved from it. ZUPT here is permitted only in `PAD` and `LANDED`.
-
-### The two axes have different sensor hierarchies
-
-Worked for a 3.2 kg vehicle on a 270 Ns / 200 N / 1.7 s motor — 6.4 g peak, burnout ~68 m/s at ~58 m, apogee ~250 m at T+8.6 s:
-
-| attitude error | vertical accel error | **lateral** accel error | drift by apogee |
-|---|---|---|---|
-| 0.5° | 0.004 m/s² | 0.43 m/s² | 16 m |
-| 1.0° | 0.007 m/s² | 0.87 m/s² | **32 m** |
-| 2.0° | 0.030 m/s² | 1.73 m/s² | **64 m** |
-
-Attitude error barely touches the vertical axis but projects the whole thrust vector sideways. So:
-
-- **Vertical is baro-led.** A differential barometer referenced to the pad, differentiated by the Kalman filter into climb rate — the number the landing burn is solved from.
-- **Horizontal is GPS-led, and that is not optional.** Dead reckoning cannot hold position through the table above. 8.6 s of ascent is ~43 fixes at 5 Hz (the ceiling on the Seeed XIAO L76K carrier), each an absolute, non-drifting reference against which that drift simply cannot accumulate. **GPS is used through the entire flight**, de-weighted by phase rather than switched off. The 200 ms inter-fix interval is why the latency compensation in `applyGpsFix()` is doing real work rather than a rounding correction.
-
-**GPS altitude is almost not trusted at all** — a 15 m σ floor makes it a blunder detector (blocked static port, dead sensor), not a measurement. It is tempting to argue the other way, since static-port error grows with v² while GPS has no airspeed term. But that does not survive checking *when* the error actually bites: the baro's dynamic error peaks at burnout and falls to **zero at apogee**, because apogee is by definition where the vehicle is not moving. The altitude number that matters most is measured at the exact moment the barometer is cleanest.
-
-**GPS speed and course are where GPS earns its place.** Doppler-derived, so far more accurate than GPS position *and* completely independent of the INS drift they are correcting — this is what stops the lateral error above from integrating. Gated on ground speed (course is meaningless when barely moving) and aged forward by the acceleration the IMU measured during the fix's 150 ms of latency.
-
-**Trust is driven by HDOP and measured acceleration, not by flight phase.** HDOP is the dominant term and enters linearly — that is what a dilution of precision *is* — swinging σ by 7× across its 0.8–6.0 range. On top of that, σ inflates once specific force passes `GPS_ACCEL_KNEE_G` (default **4.0 g**, tune for your vehicle), because high g is when fix latency hurts most and when the receiver's tracking loops are most stressed. Measured acceleration beats flight state as a trust signal: it is continuous, it tracks what the vehicle is actually doing, and it does not depend on the state machine having called burnout correctly. It also gets coast right for free — free fall reads ~0 g, which is benign for the receiver, so GPS is trusted fully there with no special case.
-
-What GPS still can't do: NMEA carries no vertical velocity. Nothing depends on a fix arriving — every source is quality-gated, and outages are counted and reported after the flight.
-
-### Other rocket-specific changes
-
-| Change | Why |
-|---|---|
-| Baro trust scheduled on v² and phase | Static-port error grows with airspeed; motor plume pressurizes the base |
-| Accel bias frozen outside PAD/LANDED, hard-clamped | At 6 g the bias state would absorb *scale-factor* error, which is wrong the moment the motor stops |
-| Mag correction off during motor burns | Igniter current and a steel casing move the local field |
-| Process noise scheduled per phase | 2.5 m/s²/√Hz under thrust vs 0.10 on the pad |
-| 20-bit FIFO at 4 kHz | Pins ±16 g / ±2000 dps, and gives 16× resolution in the near-zero-g coast |
-| Barometer at the driver's full 240 Hz, read at 100 Hz | Bandwidth over per-sample noise — the opposite of the ground-vehicle sketch's choice. Altitude lag turns directly into landing-burn error; per-sample noise is what the Kalman filter exists to absorb. Same part, different right answer |
-| 400 kHz I2C | Magnetometer at 200 Hz plus barometer at 100 Hz would eat a sixth of core 0 at the 100 kHz default |
-| Flight recorder in RAM | ~40 s at 100 Hz (~144 KB), including pre-launch; freezes after touchdown so the flight can't be overwritten while the rocket sits in a field |
-
-**Attitude correction switches itself off, and that is correct.** `AdvancedTriFusion` gates the accelerometer with a Gaussian centred on 1 g (σ 0.05). At 6 g of boost and at ~0 g in coast that gain is numerically zero, so attitude is pure gyro integration exactly when the accelerometer is not measuring gravity. This needs no configuration and is the single most useful property of the library for rocketry.
-
-### Mounting
-
-Set `ROCKET_MOUNT` so that **after** the library's axis remap, **+Z points up the rocket**. Launch detection, burnout detection and saturation checks all read the axial channel as the remapped Z, so getting this wrong breaks all of them at once.
-
-### Runtime keys
-
-`p` dump flight log as CSV · `Z` force-freeze the log · `z` reset filter and recorder · `d` raw NMEA · `h` help
 
 ---
 
