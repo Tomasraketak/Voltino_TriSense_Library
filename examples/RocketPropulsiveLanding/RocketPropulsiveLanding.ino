@@ -77,38 +77,62 @@
  *    used through the ENTIRE flight here, de-weighted by phase rather than
  *    switched off.
  *
- * 3. GPS ALTITUDE IS KEPT IN FLIGHT, BECAUSE IT IS UNBIASED WHERE THE BARO IS NOT.
- *    The two vertical sources fail in different ways, which is exactly what makes
- *    them worth having together. Flow over an imperfect static port makes the
- *    barometer read HIGH, and that error grows with v^2 - so it is worst at
- *    burnout, at 68 m/s, which is also when the ascent is most energetic. GPS
- *    altitude is noisy (5-10 m) but has no airspeed term at all. It is applied as
- *    a second, loose measurement on the Down axis, and its job is to stop the
- *    baro's dynamic bias from integrating into the apogee estimate.
+ * 3. GPS ALTITUDE IS ALMOST NOT TRUSTED AT ALL.
+ *    Vertical stays baro + integrated accelerometer. GPS altitude enters with a
+ *    15 m sigma floor - loose enough that it cannot move the solution, tight
+ *    enough to catch a blocked static port or a dead sensor.
  *
- * 4. WHAT GPS STILL CANNOT DO HERE.
+ *    An earlier draft justified trusting it more, on the grounds that static-port
+ *    error grows with v^2 while GPS has no airspeed term. That argument does not
+ *    survive checking WHEN the error actually bites: the baro's dynamic error
+ *    peaks at burnout, at 68 m/s, and falls to zero at apogee, because apogee is
+ *    by definition where the vehicle is not moving. The single altitude number
+ *    that matters most is measured at the exact moment the barometer is cleanest.
+ *    Meanwhile GPS vertical error is 5-15 m, persistent, and does not care what
+ *    the vehicle is doing. Feeding that into a 250 m flight buys noise.
+ *
+ * 4. GPS SPEED AND COURSE ARE THE HORIZONTAL VELOCITY CALIBRATION.
+ *    This is where GPS earns its place. Ground speed and course over ground come
+ *    from Doppler, not from differencing positions, so they are far more accurate
+ *    than GPS position and completely immune to the INS drift they are correcting.
+ *    They are what stop the lateral error in the table above from integrating.
+ *    Course is meaningless when barely moving, so the measurement is gated on
+ *    ground speed, and it is aged forward by the measured acceleration.
+ *
+ * 5. TRUST IS DRIVEN BY HDOP AND MEASURED ACCELERATION, NOT BY FLIGHT PHASE.
+ *    HDOP is the dominant term and enters linearly - that is what a dilution of
+ *    precision means. On top of it, sigma is inflated once measured specific
+ *    force passes GPS_ACCEL_KNEE_G, because high g is when fix latency hurts most
+ *    (150 ms at 40 m/s^2 is 6 m/s) and when the receiver's tracking loops are
+ *    under the most stress.
+ *
+ *    Measured acceleration is a better trust signal than the flight state: it is
+ *    continuous, it responds to what the vehicle is actually doing, and it does
+ *    not depend on the state machine having called burnout correctly. It also
+ *    gets the coast phase right for free - free fall reads ~0 g, which is benign
+ *    for the receiver, so GPS is trusted fully there without a special case.
+ *
+ * 6. WHAT GPS STILL CANNOT DO HERE.
  *    NMEA carries no vertical velocity, so climb rate - the number the landing
- *    burn is solved from - comes entirely from baro + accelerometer. Fix latency
- *    of 100-200 ms is 6 m/s of velocity error during a 40 m/s^2 boost, so
- *    velocity aiding is de-weighted while the motor is lit. And lock can drop
- *    under boost vibration: nothing here depends on a fix arriving, every source
- *    is gated on quality, and outages are counted and reported after the flight.
+ *    burn is solved from - comes entirely from baro + accelerometer. And lock can
+ *    drop under boost vibration: nothing here depends on a fix arriving, every
+ *    source is gated on quality, and outages are counted and reported afterwards.
  *
- * 5. BAROMETER TRUST IS SCHEDULED ON AIRSPEED AND FLIGHT PHASE.
+ * 7. BAROMETER TRUST IS SCHEDULED ON AIRSPEED AND FLIGHT PHASE.
  *    Flow over an imperfect static port reads low at speed, so apparent altitude
  *    reads high, and the error grows with v^2. Motor plume during boost and the
  *    landing burn pressurizes the base and is worse still. The measurement noise
  *    is therefore inflated as R = (sigma * phaseMultiplier)^2 + (k*v^2)^2 rather
  *    than the baro being trusted equally throughout.
  *
- * 6. THE ACCELEROMETER BIAS STATE IS FROZEN UNDER HIGH G.
+ * 8. THE ACCELEROMETER BIAS STATE IS FROZEN UNDER HIGH G.
  *    The bias state exists to absorb a constant offset; at 10-15 g what it would
  *    actually absorb is scale-factor error, which is proportional to acceleration
  *    and therefore wrong the moment the motor stops. Bias random walk is set to
  *    zero outside PAD/LANDED and the state is hard-clamped, exactly the way the
  *    library bounds its own learned gyro bias.
  *
- * 7. ATTITUDE CORRECTION SWITCHES ITSELF OFF, AND THAT IS CORRECT.
+ * 9. ATTITUDE CORRECTION SWITCHES ITSELF OFF, AND THAT IS CORRECT.
  *    AdvancedTriFusion gates the accelerometer with a Gaussian centred on 1 g
  *    (sigma 0.05). At 10 g of boost, and at ~0 g in coast, that gain is
  *    numerically zero, so attitude is pure gyro integration exactly when the
@@ -117,11 +141,11 @@
  *    this sketch adds is turning the magnetometer down during motor burns, where
  *    igniter current and the steel casing move the field.
  *
- * 8. FLIGHT STATE MACHINE.
+ * 10. FLIGHT STATE MACHINE.
  *    Process noise, ZUPT, bias learning, baro trust, GPS use and magnetometer
  *    trust are all scheduled from PAD/BOOST/COAST/DESCENT/LANDING_BURN/LANDED.
  *
- * 9. FLIGHT LOG IN RAM.
+ * 11. FLIGHT LOG IN RAM.
  *    Telemetry you did not record is telemetry you do not have. ~40 s at 100 Hz
  *    lands in a static buffer, including the seconds before launch, and is dumped
  *    as CSV after touchdown. The buffer freezes after landing so the flight
@@ -253,25 +277,53 @@ static float MAG_SOFT_IRON[3][3] = {
 #define BARO_MULT_BURN        12.0f
 #define BARO_MULT_COAST       2.0f
 
-// GPS. Used throughout the flight - position, velocity AND altitude - with the
-// sigma scheduled by phase rather than the source being switched off.
-#define GPS_UERE_M            2.5f     // sigma_horizontal = GPS_UERE_M * HDOP
-#define GPS_VDOP_FACTOR       2.2f     // sigma_vertical = this * sigma_horizontal
-#define GPS_VEL_SIGMA         0.30f    // m/s at HDOP 1
-#define GPS_VEL_MIN_MPS       3.0f     // below this, course over ground is noise
+/*
+ * GPS. Used throughout the flight, but with sharply different weight per axis:
+ * horizontal position and velocity are the primary references, while altitude is
+ * barely trusted at all. See points 3-5 in the header.
+ *
+ *      sigma_horizontal = GPS_UERE_M * HDOP * trust(accel)
+ *      sigma_velocity   = GPS_VEL_SIGMA * HDOP * trust(accel)
+ *      sigma_altitude   = max(the above * GPS_VDOP_FACTOR, GPS_ALT_SIGMA_MIN_M)
+ */
+#define GPS_UERE_M            2.5f     // m of horizontal error per unit HDOP
+#define GPS_VEL_SIGMA         0.30f    // m/s at HDOP 1. Doppler-derived, hence small
+#define GPS_VEL_MIN_MPS       2.0f     // below this, course over ground is noise
 #define GPS_MIN_SATS          4
-#define GPS_MAX_HDOP          6.0f
+#define GPS_MAX_HDOP          6.0f     // hard reject above this
 #define GPS_LATENCY_S         0.15f
 #define GPS_OUTAGE_MS         800      // no usable fix for this long = an outage
 
-// Phase multipliers on the GPS sigmas. Boost is de-weighted because 150 ms of
-// fix latency at 40 m/s^2 is 6 m/s of velocity error, and because that is when
-// the receiver's tracking loops are under the most stress - not because the data
-// is useless.
-#define GPS_MULT_BOOST        3.0f
-#define GPS_MULT_COAST        1.5f
-#define GPS_MULT_DESCENT      1.5f
-#define GPS_MULT_BURN         3.0f
+// --- GPS altitude: deliberately almost ignored ------------------------------
+// Vertical belongs to the barometer and the integrated accelerometer. The sigma
+// floor is what makes this a blunder detector rather than a measurement: loose
+// enough that it cannot pull the altitude solution around, tight enough that a
+// blocked static port or a dead BMP580 still gets caught by the innovation gate.
+// Set GPS_ALT_ENABLE to 0 to drop it entirely.
+#define GPS_ALT_ENABLE        1
+#define GPS_VDOP_FACTOR       4.0f     // vertical sigma relative to horizontal
+#define GPS_ALT_SIGMA_MIN_M   15.0f    // ... but never tighter than this
+
+/*
+ * --- Dynamic trust: HDOP first, then measured acceleration ------------------
+ *
+ * HDOP is the dominant term and enters LINEARLY, because that is what a dilution
+ * of precision is: it ranges 0.8 to the 6.0 reject threshold, so it can swing the
+ * sigma by 7x on its own.
+ *
+ * On top of that, sigma is inflated once measured specific force passes the knee.
+ * High g is when fix latency hurts most (150 ms at 40 m/s^2 is 6 m/s of velocity
+ * error) and when the receiver's tracking loops are under the most stress.
+ *
+ * TUNE THE KNEE FOR YOUR VEHICLE. At 4.0 g a 3.2 kg airframe on a 200 N motor
+ * (6.4 g peak, 5.1 g average) is de-weighted for most of the burn and trusted
+ * fully everywhere else - including coast, which reads ~0 g in free fall and is
+ * benign for the receiver. Raise the knee if your boost is gentler; lower it if
+ * you see GPS fighting the filter under thrust.
+ */
+#define GPS_ACCEL_KNEE_G      4.0f     // no extra de-weighting below this
+#define GPS_ACCEL_SLOPE       1.0f     // sigma multiplier added per g above it
+#define GPS_ACCEL_MAX_MULT    6.0f     // cap on the multiplier
 
 #define ZUPT_VEL_SIGMA        0.02f
 #define ZUPT_ACC_TOL_G        0.04f
@@ -604,16 +656,23 @@ static bool phaseAllowsZupt(FlightState s) {
   return (s == FS_PAD) || (s == FS_LANDED);
 }
 
-// GPS is never switched off - it is the only non-drifting horizontal reference
-// the vehicle has. It is only ever trusted less.
-static float phaseGpsMultiplier(FlightState s) {
-  switch (s) {
-    case FS_BOOST:        return GPS_MULT_BOOST;
-    case FS_COAST:        return GPS_MULT_COAST;
-    case FS_DESCENT:      return GPS_MULT_DESCENT;
-    case FS_LANDING_BURN: return GPS_MULT_BURN;
-    default:              return 1.0f;
-  }
+/*
+ * GPS sigma multiplier from measured specific force, in g.
+ *
+ * GPS is never switched off - it is the only non-drifting horizontal reference
+ * the vehicle has, and switching it off is how the lateral drift in the header
+ * table gets to accumulate unchallenged. It is only ever trusted less.
+ *
+ * Driving this from measured acceleration rather than from the flight state is
+ * deliberate: it is continuous, it tracks what the vehicle is actually doing, and
+ * it does not depend on the state machine having called burnout correctly. Free
+ * fall reads ~0 g and is benign for the receiver, so coast gets full trust with
+ * no special case.
+ */
+static float gpsAccelTrust(float accelG) {
+  if (accelG <= GPS_ACCEL_KNEE_G) return 1.0f;
+  const float m = 1.0f + GPS_ACCEL_SLOPE * (accelG - GPS_ACCEL_KNEE_G);
+  return (m > GPS_ACCEL_MAX_MULT) ? (float)GPS_ACCEL_MAX_MULT : m;
 }
 
 static float phaseBaroMultiplier(FlightState s) {
@@ -764,9 +823,10 @@ static bool takeGpsFix(GpsFix &out) {
   return fresh;
 }
 
-// aN/aE/aD are the current world-frame accelerations, used to age the GPS
-// velocity forward the same way position is aged forward.
-static void applyGpsFix(const GpsFix &fix, float aN, float aE) {
+// aN/aE are the current world-frame accelerations, used to age the GPS velocity
+// forward the same way position is aged forward. accelG is the measured specific
+// force magnitude in g, which drives the dynamic trust multiplier.
+static void applyGpsFix(const GpsFix &fix, float aN, float aE, float accelG) {
   if (fix.sats < GPS_MIN_SATS || fix.hdop > GPS_MAX_HDOP) return;
 
   const uint32_t nowMs = millis();
@@ -783,7 +843,8 @@ static void applyGpsFix(const GpsFix &fix, float aN, float aE) {
     return;
   }
 
-  const float mult = phaseGpsMultiplier(flightState);
+  // HDOP (linear, dominant) x dynamic stress from measured acceleration.
+  const float mult = gpsAccelTrust(accelG);
 
   // Total age of the measurement: the receiver's own processing lag plus however
   // long the fix has been sitting in the cross-core mailbox.
@@ -814,11 +875,15 @@ static void applyGpsFix(const GpsFix &fix, float aN, float aE) {
     gpsRejects = 0;
   }
 
-  // --- Horizontal velocity ---------------------------------------------------
-  // Doppler-derived, so it is far more accurate than GPS position - but NMEA
-  // reports it as speed + course, and course is meaningless when barely moving.
-  // Aged forward by the measured acceleration, which is what makes this usable
-  // during boost at all.
+  // --- Horizontal velocity: the calibration that matters ---------------------
+  // Ground speed and course over ground are Doppler-derived, not differenced
+  // positions, so they are far more accurate than GPS position AND completely
+  // independent of the INS drift they are correcting. This is what stops the
+  // lateral error in the header table from integrating.
+  //
+  // Two caveats handled here: course is meaningless when barely moving, hence
+  // the speed gate; and the measurement is 150+ ms old, hence aging it forward
+  // by the acceleration the IMU measured in the meantime.
   if (fix.haveVel && fix.speedMps > GPS_VEL_MIN_MPS) {
     const float cr = fix.courseDeg * DEG2RAD;
     const float sv = GPS_VEL_SIGMA * hdop * mult;
@@ -827,15 +892,21 @@ static void applyGpsFix(const GpsFix &fix, float aN, float aE) {
     kfCorrect(kfE, 1, fix.speedMps * sinf(cr) + aE * lag, Rv, GATE_SIGMA);
   }
 
-  // --- Altitude: a second, independent vertical source -----------------------
-  // Kept in flight on purpose. The barometer's error grows with airspeed squared
-  // and peaks at burnout; GPS altitude is noisy but has no airspeed term, so it
-  // is what stops that dynamic bias from integrating into the apogee estimate.
+#if GPS_ALT_ENABLE
+  // --- Altitude: a blunder detector, not a measurement -----------------------
+  // The sigma floor is the whole point. Vertical belongs to the barometer and the
+  // integrated accelerometer, which are better than GPS by an order of magnitude
+  // over a 250 m flight - and the apogee number in particular is measured at the
+  // one moment the barometer is cleanest, because apogee is where airspeed is
+  // zero. What this correction is here for is a blocked static port or a dead
+  // sensor, where the baro walks away and nothing else would notice.
   if (fix.haveAlt && padAltMSLValid) {
-    const float sigV = GPS_UERE_M * hdop * GPS_VDOP_FACTOR * mult;
-    const float zD   = -(fix.altMSL - padAltMSL) + kfD.x[1] * lag;
+    float sigV = GPS_UERE_M * hdop * GPS_VDOP_FACTOR * mult;
+    if (sigV < GPS_ALT_SIGMA_MIN_M) sigV = GPS_ALT_SIGMA_MIN_M;
+    const float zD = -(fix.altMSL - padAltMSL) + kfD.x[1] * lag;
     kfCorrect(kfD, 0, zD, sigV * sigV, GATE_SIGMA);
   }
+#endif
 
   // --- MSL datum -------------------------------------------------------------
   // Only trained on the ground. In flight both sources are degraded, and moving
@@ -1109,8 +1180,13 @@ static void navStep(float dt) {
   }
 
   // --- 5. GPS -----------------------------------------------------------------
+  // Specific force magnitude, in g, drives the dynamic trust multiplier. Computed
+  // here rather than in section 6 because applyGpsFix() needs it.
+  const float accelMagG = sqrtf((float)(fusion.lastAx * fusion.lastAx +
+                                        fusion.lastAy * fusion.lastAy +
+                                        fusion.lastAz * fusion.lastAz));
   GpsFix fix;
-  if (takeGpsFix(fix)) applyGpsFix(fix, aN, aE);
+  if (takeGpsFix(fix)) applyGpsFix(fix, aN, aE, accelMagG);
 
   // GPS health. An outage is a fact about the flight, not an error - log it and
   // report it afterwards so the next flight's tuning is based on evidence.
@@ -1126,9 +1202,7 @@ static void navStep(float dt) {
   }
 
   // --- 6. Standstill / ZUPT ---------------------------------------------------
-  const float amag = sqrtf((float)(fusion.lastAx * fusion.lastAx +
-                                   fusion.lastAy * fusion.lastAy +
-                                   fusion.lastAz * fusion.lastAz));
+  const float amag = accelMagG;
   const float gsum = fabsf((float)fusion.lastGx) +
                      fabsf((float)fusion.lastGy) +
                      fabsf((float)fusion.lastGz);
