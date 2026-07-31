@@ -148,22 +148,34 @@ static float MAG_SOFT_IRON[3][3] = {
 /*
  * YAW SENSE
  * ---------
- * TriSenseFusion reports yaw from getOrientationDegrees(). This sketch has to
- * know whether that number is a CLOCKWISE compass heading (0 = North, 90 = East,
- * what a map bearing means) or a COUNTER-CLOCKWISE bearing (0 = North, 90 = West),
- * because it rotates the acceleration vector into North/East with it. Which one
- * you get depends on how the AK09918C's axes sit relative to the ICM-42688-P on
- * your board revision, so it cannot be settled from the library source alone.
+ * This sketch rotates acceleration into North/East using the yaw from
+ * getOrientationDegrees(), so it has to know whether that number is a CLOCKWISE
+ * compass heading (0 = North, 90 = East, what a map bearing means) or a
+ * COUNTER-CLOCKWISE bearing (0 = North, 90 = West).
  *
- * Two ways to settle it:
+ * On the TriSense Pro it is a compass heading, which is why this defaults to 1.
+ * The switch stays because the answer depends on how the AK09918C's axes sit
+ * relative to the ICM-42688-P, and that is a board-layout property rather than
+ * something the library source pins down. Confirm on your unit either way:
  *   a) Point the board's +X axis East. Compass heading -> yaw reads ~90.
  *      Counter-clockwise bearing -> yaw reads ~270.
- *   b) Just run this sketch and move in a straight line above 2 m/s. It compares
- *      yaw against GPS course over ground and prints a one-time verdict.
+ *   b) Run this sketch and move in a straight line above 2 m/s. It compares yaw
+ *      against GPS course over ground and prints a one-time verdict. That check
+ *      doubles as a magnetometer-calibration and declination sanity test, since
+ *      a bad hard-iron fit shows up as heading that will not track course.
  *
- * If you end up setting this to 0, also negate MAGNETIC_DECLINATION: the library
- * adds declination to that same yaw value, so a counter-clockwise yaw needs the
+ * If you ever set this to 0, also negate MAGNETIC_DECLINATION: the library adds
+ * declination to that same yaw value, so a counter-clockwise yaw needs the
  * opposite sign to end up pointing at true north.
+ *
+ * NOTE - why this sketch does NOT use getGlobalAcceleration(): with a clockwise
+ * compass yaw, the library builds its quaternion as Rz(+yaw), while a geographic
+ * frame needs Rz(-yaw). The two agree for anything along body +X but come out
+ * mirrored for the body +Y (left) component, so the library's "world" X/Y are not
+ * a consistent North/East pair. This sketch therefore takes body-frame linear
+ * acceleration - which is yaw-independent, since the gravity vector it removes is
+ * a function of roll and pitch only - and does the heading rotation itself, below
+ * in navStep(). Roll and pitch are unaffected either way.
  */
 #define YAW_IS_COMPASS_HEADING 1
 
@@ -171,6 +183,29 @@ static float MAG_SOFT_IRON[3][3] = {
 #define NAV_RATE_HZ           100      // Kalman predict rate
 #define BARO_RATE_HZ          25       // Barometer read rate (I2C traffic)
 #define TELEMETRY_HZ          10       // Serial output rate
+
+/*
+ * IMU output data rate.
+ *
+ * 2 kHz is not a compromise on attitude accuracy. First-order quaternion
+ * integration loses about (w*dt)^3/12 rad per step, which at 2 kHz and a full
+ * 2000 deg/s slew is 0.05 deg/s of drift - half a degree over a ten-second
+ * aerobatic sequence, and utterly negligible in normal motion. The anti-alias
+ * bandwidth (~ODR/2 = 1 kHz) is likewise far above anything a vehicle produces.
+ *
+ * The real reason to raise it is VIBRATION AVERAGING. Each nav step averages one
+ * 10 ms batch of accelerometer samples: 20 samples at 2 kHz, 80 at 8 kHz, so
+ * 8 kHz cuts the residual vibration in that mean by 2x. Cost is only ~2% of one
+ * core at 8 kHz, so:
+ *
+ *    ODR_1KHZ / ODR_2KHZ   rovers, boats, cars, handheld trackers, fixed-wing
+ *    ODR_4KHZ / ODR_8KHZ   multirotors and anything else with props or a motor
+ *                          bolted to the same frame as the sensor
+ *
+ * If you see "IMU FIFO OVERFLOW" in the log, the loop is not draining fast
+ * enough - lower this rather than living with the dropped packets.
+ */
+#define IMU_ODR               ODR_2KHZ
 
 // ---- Filter tuning ----------------------------------------------------------
 // Process noise. ACC_PSD is the acceleration noise DENSITY driving velocity, in
@@ -186,6 +221,10 @@ static float MAG_SOFT_IRON[3][3] = {
 // Measurement noise.
 #define GPS_UERE_M            2.2f     // sigma_position = GPS_UERE_M * HDOP   [m]
 #define GPS_VEL_SIGMA         0.25f    // sigma_velocity at HDOP 1           [m/s]
+// BARO_ALT_SIGMA is dominated by the ATMOSPHERE, not by the BMP580: with the
+// oversampling set in setup() the sensor contributes ~4 cm, while wind gusts,
+// prop wash and opening a car door contribute decimetres. Raise it if altitude
+// looks twitchy on your platform; lower it only inside a shielded static port.
 #define BARO_ALT_SIGMA        0.6f     // short-term barometric altitude noise [m]
 #define ZUPT_VEL_SIGMA        0.02f    // how hard a detected standstill pins v [m/s]
 
@@ -753,15 +792,26 @@ void setup() {
     while (1) { delay(1000); }
   }
 
-  // 2 kHz instead of the 8 kHz default: attitude for navigation does not need
-  // more, and the spare cycles and SPI bandwidth are worth more than the
-  // bandwidth would be.
-  sensor.imu.setODR(ODR_2KHZ);
+  sensor.imu.setODR(IMU_ODR);
   sensor.imu.setFIFOMode(FIFO_16BIT);
 
-  // A little pressure filtering: altitude feeds a Kalman measurement, so a
-  // smoother input is what justifies a BARO_ALT_SIGMA this small.
-  sensor.bmp.setIIRFilter(BMP580_IIR_7, BMP580_IIR_3);
+  // Barometer tuned for navigation rather than weather logging. Configuration
+  // registers only latch reliably in standby, so bracket the writes.
+  //
+  //   OSR x8 on pressure  -> roughly 4 cm RMS of sensor noise, vs ~11 cm at x2
+  //   ODR 50 Hz           -> 2x the 25 Hz read rate, so no aliasing
+  //   IIR coefficient 1   -> light anti-alias filter, ~20 ms of group delay
+  //
+  // Deliberately NOT filtered harder than that: the Kalman filter is the
+  // smoother here, and it does that job better when handed a low-latency
+  // measurement with an honestly stated sigma than a pre-smoothed, laggy one.
+  sensor.bmp.setPowerMode(BMP580_MODE_STANDBY);
+  delay(5);
+  sensor.bmp.setOversampling(BMP580_OSR_x8, BMP580_OSR_x1);
+  sensor.bmp.setODR(BMP580_ODR_50p1Hz);
+  sensor.bmp.setIIRFilter(BMP580_IIR_1, BMP580_IIR_OFF);
+  sensor.bmp.setPowerMode(BMP580_MODE_NORMAL);
+  delay(20);
 
   sensor.autoCalibrateGyro(1000);
 
