@@ -414,7 +414,7 @@ Worked for a 3.2 kg vehicle on a 270 Ns / 200 N / 1.7 s motor — 6.4 g peak, bu
 Attitude error barely touches the vertical axis but projects the whole thrust vector sideways. So:
 
 - **Vertical is baro-led.** A differential barometer referenced to the pad, differentiated by the Kalman filter into climb rate — the number the landing burn is solved from.
-- **Horizontal is GPS-led, and that is not optional.** Dead reckoning cannot hold position through the table above. 8.6 s of ascent is ~86 fixes at 10 Hz, each an absolute, non-drifting reference. **GPS is used through the entire flight**, de-weighted by phase rather than switched off.
+- **Horizontal is GPS-led, and that is not optional.** Dead reckoning cannot hold position through the table above. 8.6 s of ascent is ~43 fixes at 5 Hz (the ceiling on the Seeed XIAO L76K carrier), each an absolute, non-drifting reference against which that drift simply cannot accumulate. **GPS is used through the entire flight**, de-weighted by phase rather than switched off. The 200 ms inter-fix interval is why the latency compensation in `applyGpsFix()` is doing real work rather than a rounding correction.
 
 **GPS altitude is kept in flight too**, because the two vertical sources fail differently. Static-port error makes the barometer read high and grows with v² — worst at burnout, at 68 m/s. GPS altitude is noisy (5–10 m) but has *no airspeed term*, so it is applied as a second loose measurement whose job is to stop the baro's dynamic bias from integrating into the apogee estimate.
 
@@ -429,6 +429,8 @@ What GPS still can't do: NMEA carries no vertical velocity, and 150 ms of latenc
 | Mag correction off during motor burns | Igniter current and a steel casing move the local field |
 | Process noise scheduled per phase | 2.5 m/s²/√Hz under thrust vs 0.10 on the pad |
 | 20-bit FIFO at 4 kHz | Pins ±16 g / ±2000 dps, and gives 16× resolution in the near-zero-g coast |
+| Barometer at the driver's full 240 Hz, read at 100 Hz | Bandwidth over per-sample noise — the opposite of the ground-vehicle sketch's choice. Altitude lag turns directly into landing-burn error; per-sample noise is what the Kalman filter exists to absorb. Same part, different right answer |
+| 400 kHz I2C | Magnetometer at 200 Hz plus barometer at 100 Hz would eat a sixth of core 0 at the 100 kHz default |
 | Flight recorder in RAM | ~40 s at 100 Hz (~144 KB), including pre-launch; freezes after touchdown so the flight can't be overwritten while the rocket sits in a field |
 
 **Attitude correction switches itself off, and that is correct.** `AdvancedTriFusion` gates the accelerometer with a Gaussian centred on 1 g (σ 0.05). At 6 g of boost and at ~0 g in coast that gain is numerically zero, so attitude is pure gyro integration exactly when the accelerometer is not measuring gravity. This needs no configuration and is the single most useful property of the library for rocketry.

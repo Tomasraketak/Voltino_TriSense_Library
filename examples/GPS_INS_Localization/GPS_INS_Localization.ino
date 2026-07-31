@@ -257,6 +257,8 @@ static float MAG_SOFT_IRON[3][3] = {
 #define PCAS_BAUD_115200   "PCAS01,5"
 #define PCAS_RATE_1HZ      "PCAS02,1000"
 #define PCAS_RATE_5HZ      "PCAS02,200"
+// Not every L76K carrier accepts 10 Hz - the Seeed XIAO L76K tops out at 5. If
+// the 'r' key makes the receiver go quiet, that is why; press 's' to recover.
 #define PCAS_RATE_10HZ     "PCAS02,100"
 // PCAS03 field order: GGA,GLL,GSA,GSV,RMC,VTG,ZDA,ANT,DHV,LPS,res,res,UTC,GST,res,res,res,TIM
 #define PCAS_NMEA_MINIMAL  "PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0,,,,0"
@@ -795,6 +797,10 @@ void setup() {
   sensor.imu.setODR(IMU_ODR);
   sensor.imu.setFIFOMode(FIFO_16BIT);
 
+  // 400 kHz I2C rather than the 100 kHz default, so the magnetometer and
+  // barometer reads stay a rounding error on core 0's budget.
+  sensor.bmp.setI2CSpeed(400000);
+
   // Barometer tuned for navigation rather than weather logging. Configuration
   // registers only latch reliably in standby, so bracket the writes.
   //
@@ -802,9 +808,15 @@ void setup() {
   //   ODR 50 Hz           -> 2x the 25 Hz read rate, so no aliasing
   //   IIR coefficient 1   -> light anti-alias filter, ~20 ms of group delay
   //
-  // Deliberately NOT filtered harder than that: the Kalman filter is the
-  // smoother here, and it does that job better when handed a low-latency
-  // measurement with an honestly stated sigma than a pre-smoothed, laggy one.
+  // This deliberately trades rate for per-sample noise, which is the OPPOSITE of
+  // what RocketPropulsiveLanding.ino does with the same sensor. A ground vehicle
+  // has slow vertical dynamics, so low noise is worth more than bandwidth; a
+  // rocket needs the driver's full 240 Hz because altitude lag turns into
+  // landing-burn error. Same part, different right answer.
+  //
+  // Also deliberately NOT filtered harder: the Kalman filter is the smoother
+  // here, and it does that job better when handed a low-latency measurement with
+  // an honestly stated sigma than a pre-smoothed, laggy one.
   sensor.bmp.setPowerMode(BMP580_MODE_STANDBY);
   delay(5);
   sensor.bmp.setOversampling(BMP580_OSR_x8, BMP580_OSR_x1);

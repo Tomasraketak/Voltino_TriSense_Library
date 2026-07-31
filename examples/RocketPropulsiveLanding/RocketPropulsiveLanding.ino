@@ -72,9 +72,10 @@
  *            2.0 deg        1.73 m/s^2         2.9 m/s             64 m
  *
  *    Dead reckoning cannot hold horizontal position through that. GPS can: 8.6 s
- *    of ascent is ~86 fixes at 10 Hz, and each one is an absolute, non-drifting
- *    reference. GPS is used through the ENTIRE flight here, de-weighted by phase
- *    rather than switched off.
+ *    of ascent is ~43 fixes at 5 Hz, and each one is an absolute, non-drifting
+ *    reference against which the drift above simply cannot accumulate. GPS is
+ *    used through the ENTIRE flight here, de-weighted by phase rather than
+ *    switched off.
  *
  * 3. GPS ALTITUDE IS KEPT IN FLIGHT, BECAUSE IT IS UNBIASED WHERE THE BARO IS NOT.
  *    The two vertical sources fail in different ways, which is exactly what makes
@@ -221,7 +222,7 @@ static float MAG_SOFT_IRON[3][3] = {
 
 // ---- Rates ------------------------------------------------------------------
 #define NAV_RATE_HZ           200      // Kalman predict rate
-#define BARO_RATE_HZ          50       // barometer read rate
+#define BARO_RATE_HZ          100      // barometer read rate (sensor runs 240 Hz)
 #define LOG_RATE_HZ           100      // flight recorder rate
 #define TELEMETRY_HZ          20
 
@@ -286,11 +287,12 @@ static float MAG_SOFT_IRON[3][3] = {
 // ===========================================================================
 #define PCAS_BAUD_115200   "PCAS01,5"
 #define PCAS_RATE_1HZ      "PCAS02,1000"
+// 5 Hz is the ceiling on the Seeed XIAO L76K carrier. Over an 8.6 s ascent that
+// is ~43 fixes, which is ample: what matters is that each one is an absolute
+// reference, not how densely they arrive. It does mean the inter-fix interval is
+// 200 ms, so the latency compensation in applyGpsFix() is doing real work rather
+// than being a rounding correction - do not remove it.
 #define PCAS_RATE_5HZ      "PCAS02,200"
-// 10 Hz for flight: the whole ascent is 8.6 s, and the difference between 43 and
-// 86 fixes over that window is the difference between GPS leading the horizontal
-// solution and merely commenting on it.
-#define PCAS_RATE_10HZ     "PCAS02,100"
 #define PCAS_NMEA_MINIMAL  "PCAS03,1,0,0,0,1,0,0,0,0,0,,,0,0,,,,0"
 #define PCAS_NMEA_DEFAULT  "PCAS03,1,1,1,1,1,1,0,0,0,0,,,0,0,,,,0"
 
@@ -1202,17 +1204,32 @@ void setup() {
   // both required here - and gives 16x resolution in the near-zero-g coast.
   sensor.imu.setFIFOMode(FIFO_20BIT_HIRES);
 
-  // Barometer for a rocket: bandwidth first, then noise. Configuration registers
-  // only latch reliably in standby, so bracket the writes.
-  //   ODR 100 Hz -> 2x the 50 Hz read rate
-  //   OSR x4     -> reasonable noise without eating the ODR budget
-  //   IIR 1      -> anti-alias only. Heavier filtering adds group delay, and lag
-  //                 in the altitude signal turns directly into landing burn error.
+  // 400 kHz I2C. The bus carries the magnetometer at 200 Hz and the barometer at
+  // 100 Hz; at the 100 kHz default those two alone would eat a sixth of core 0.
+  sensor.bmp.setI2CSpeed(400000);
+
+  /*
+   * Barometer at the driver's maximum rate. For a rocket this is bandwidth over
+   * per-sample noise, which is the opposite of the choice GPS_INS_Localization
+   * makes, and the reason is lag: altitude lag turns directly into landing-burn
+   * error, whereas per-sample noise is what the Kalman filter exists to absorb.
+   *
+   *   ODR 240 Hz -> driver maximum, and 2.4x the 100 Hz read rate
+   *   OSR x2     -> the combination beginAll() already proves works at 240 Hz.
+   *                 Higher oversampling cannot sustain this ODR; the extra rate
+   *                 buys back more than the lower OSR gives up.
+   *   IIR 3      -> ~12.7 Hz cutoff, safely under the 50 Hz read-rate Nyquist so
+   *                 broadband motor vibration cannot alias into the altitude
+   *                 signal. Costs ~12.5 ms of group delay: 0.85 m at burnout
+   *                 speed, 0.4 m at a 30 m/s burn entry.
+   *
+   * Config registers only latch reliably in standby, so bracket the writes.
+   */
   sensor.bmp.setPowerMode(BMP580_MODE_STANDBY);
   delay(5);
-  sensor.bmp.setOversampling(BMP580_OSR_x4, BMP580_OSR_x1);
-  sensor.bmp.setODR(BMP580_ODR_100p3Hz);
-  sensor.bmp.setIIRFilter(BMP580_IIR_1, BMP580_IIR_OFF);
+  sensor.bmp.setOversampling(BMP580_OSR_x2, BMP580_OSR_x2);
+  sensor.bmp.setODR(BMP580_ODR_240Hz);
+  sensor.bmp.setIIRFilter(BMP580_IIR_3, BMP580_IIR_1);
   sensor.bmp.setPowerMode(BMP580_MODE_NORMAL);
   delay(20);
 
@@ -1318,7 +1335,7 @@ static void gpsConfigure() {
     }
   }
 
-  gpsSend(PCAS_RATE_10HZ);
+  gpsSend(PCAS_RATE_5HZ);
   delay(100);
   gpsSend(PCAS_NMEA_MINIMAL);
   delay(150);
