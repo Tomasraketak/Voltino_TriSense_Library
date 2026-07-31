@@ -344,6 +344,8 @@ Both engines take their time-step from the MCU's `micros()`, never the IMU's int
 
 The `GPS_INS_Localization` example does exactly that on a **Raspberry Pi Pico 2 (RP2350)** with a **Quectel L76K**, and outputs orientation, world-frame acceleration, velocity and position (local NED *and* lat/lon/alt) from one estimator.
 
+> **📖 Full documentation:** [`examples/GPS_INS_Localization/README.md`](examples/GPS_INS_Localization/README.md) — coordinate frames and their derivation, the filter maths, every measurement source, the dual-core protocol, GNSS bring-up, a tuning guide, troubleshooting and a code map. The section below is the summary.
+
 > **Extra dependency:** [TinyGPSPlus](https://github.com/mikalhart/TinyGPSPlus) by Mikal Hart (Library Manager → "TinyGPSPlus"). Only this example needs it, so it is not a dependency of the library itself.
 
 ### Architecture: a cascade, not one big filter
