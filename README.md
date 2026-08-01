@@ -338,6 +338,65 @@ Both engines take their time-step from the MCU's `micros()`, never the IMU's int
 
 ---
 
+## GPS / INS Localization (`examples/GPS_INS_Localization`)
+
+`AdvancedTriFusion` gives you drift-free **orientation**. It cannot give you position: integrating acceleration twice turns a 0.01 m/s² residual bias into 18 m of error in a minute. To get **position and velocity** you need an absolute reference, and that means fusing in GNSS.
+
+The `GPS_INS_Localization` example does exactly that on a **Raspberry Pi Pico 2 (RP2350)** with a **Quectel L76K**, and outputs orientation, world-frame acceleration, velocity and position (local NED *and* lat/lon/alt) from one estimator.
+
+> **📖 Full documentation:** [`examples/GPS_INS_Localization/README.md`](examples/GPS_INS_Localization/README.md) — coordinate frames and their derivation, the filter maths, every measurement source, the dual-core protocol, GNSS bring-up, a tuning guide, troubleshooting and a code map. The section below is the summary.
+
+> **Extra dependency:** [TinyGPSPlus](https://github.com/mikalhart/TinyGPSPlus) by Mikal Hart (Library Manager → "TinyGPSPlus"). Only this example needs it, so it is not a dependency of the library itself.
+
+### Architecture: a cascade, not one big filter
+
+| Stage | Estimator | Rate | Inputs |
+|-------|-----------|------|--------|
+| **Attitude** | `AdvancedTriFusion` (adaptive complementary filter) | IMU ODR | gyro, accel, mag |
+| **Navigation** | Linear Kalman filter, `x = [position, velocity, accel-bias]` per axis | 240 Hz | world-frame accel, GPS position, GPS velocity, baro altitude, ZUPT |
+
+**Why not a 15-state ESKF?** An error-state Kalman filter is the textbook answer and genuinely wins in one regime: long GNSS outages under high dynamics, where the filter must recover *heading* from GPS. It also costs a 15×15 covariance propagation every step. Here the magnetometer already observes heading and the accelerometer already observes tilt, so that coupling buys very little — while the cascade costs a small fraction of the arithmetic and is far easier to tune. Fly a fast fixed-wing with no usable magnetometer and you should upgrade; for rovers, boats, cars, drones and trackers the cascade is the better trade.
+
+**Why a Kalman filter for navigation and not another complementary filter?** GPS accuracy varies by an order of magnitude with HDOP, and the accelerometer bias must be *estimated*, not assumed. A Kalman filter weights each measurement by its actual variance and makes the bias observable. A fixed-gain filter can do neither.
+
+**Why three 3-state filters instead of one 9-state filter?** Because attitude is supplied externally, the 9-state system matrix is exactly block diagonal per axis, the process noise is diagonal, and every measurement touches exactly one axis. A block-diagonal covariance therefore *stays* block diagonal, so three 3×3 filters are **mathematically identical** to one 9×9 filter at roughly a ninth of the arithmetic. This is an exact factorization, not an approximation.
+
+### What each sensor contributes
+
+| Source | Corrects | Notes |
+|--------|----------|-------|
+| GPS position | N/E position | σ = `GPS_UERE_M × HDOP × trust(accel)`; extrapolated forward by `GPS_LATENCY_S` using the filter's own velocity, because an NMEA fix describes where you *were* |
+| GPS velocity | N/E velocity | from RMC speed + course — Doppler-derived, so more accurate than GPS position *and* independent of the INS drift it corrects. Ignored below `GPS_COURSE_MIN_MPS`, where course over ground is noise, and aged forward by measured acceleration |
+| Barometer | altitude | tight σ, short-term — the primary altitude source. The baro-to-GPS offset is tracked with a `BARO_TRACK_TAU_S` time constant, so altitude comes from the baro and only the *datum* comes from GPS, whose vertical error is several times its horizontal |
+| ZUPT | all three velocities | standing still is the only condition under which accelerometer bias is directly observable — without it a parked vehicle slowly "drives away" between fixes |
+
+Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` consecutive rejections are taken to mean the *filter* is wrong, and it re-anchors on GPS.
+
+**GPS trust is driven by HDOP and measured acceleration.** HDOP is the dominant term and enters linearly — that is what a dilution of precision *is*, and across its usable range it swings σ by 7× on its own. This is precisely the job a fixed-gain complementary filter cannot do. On top of it, σ inflates once measured specific force passes `GPS_ACCEL_KNEE_G` (default 2 g), because high acceleration is both when fix latency hurts most and when a receiver's tracking loops are under the most stress. Driving this from *measured* acceleration rather than a mode flag keeps it continuous and needs no knowledge of what the vehicle is doing.
+
+### RP2350-specific optimizations
+
+- **Both cores are used.** Core 0 runs only the IMU/AHRS loop and the Kalman filter and never touches USB serial; core 1 parses NMEA and prints. A blocking print on the fusion core is the classic cause of FIFO overflow — and a dropped packet is rotation that can never be recovered.
+- **Core 0 never blocks.** Cross-core state moves through two mutex-protected structs, and the real-time core only ever uses `mutex_try_enter()`; a missed handoff is retried 10 ms later.
+- **Single precision everywhere.** The Cortex-M33 has a single-precision FPU but no double-precision unit, so every `double` is a software call. Doubles appear only in latitude/longitude handling (float would quantize position to ~0.4 m), a handful of times per fix. All libm calls are `f`-suffixed — the unsuffixed versions silently promote to double.
+- **2 kHz IMU ODR** instead of the 8 kHz default: attitude bandwidth beyond a few hundred Hz is worthless for navigation, and the spare cycles become headroom.
+- **Everything else runs at the barometer's full 240 Hz** — the Kalman filter, and the barometer read that feeds it. A Kalman step is three axes of 3×3 covariance propagation plus a frame rotation, about 800 cycles, so 240 Hz costs **0.13% of one core**. Running slower would buy nothing and cost measurement latency: a sample arriving between steps waits for the next one.
+- **The barometer's hardware IIR filter is off.** An IIR exists to stop content above Nyquist aliasing when you sample slower than the ODR — sampling *at* the ODR means there is nothing to alias. Leaving it on would add group delay and, worse, correlate consecutive samples, and feeding correlated measurements to a Kalman filter at full rate makes it over-confident because it counts each as independent evidence. `BARO_ALT_SIGMA` is likewise set from the *atmosphere* (gusts, prop wash, a passing vehicle — correlated over seconds, so it does not average down) rather than from the sensor's noise figure, which does.
+- **The L76K is told to emit GGA + RMC only** (`$PCAS03`). Together they carry everything TinyGPSPlus parses; GSV alone can be four sentences per epoch. PCAS checksums are computed at runtime, so no hand-calculated `*19` constants.
+- **One fix per NMEA epoch.** The filter is updated when RMC closes the epoch, not on every sentence — publishing per-sentence feeds the same measurement in twice and makes the filter over-confident.
+
+### Before you trust the output
+
+1. **Calibrate the magnetometer** (`MotionCal` example). A heading error rotates your entire velocity vector.
+2. **Set `MAGNETIC_DECLINATION`** — GPS course is relative to *true* north.
+3. **Check `YAW_IS_COMPASS_HEADING`.** The sketch needs to know whether `getOrientationDegrees()`'s yaw is a clockwise compass heading (0 = N, 90 = E) or a counter-clockwise bearing (0 = N, 90 = W), because it rotates acceleration into North/East with it. Which one you get depends on how the AK09918C's axes sit relative to the ICM-42688-P on your board revision. Get it wrong and East/West is mirrored — so the sketch compares yaw against GPS course over ground while you move in a straight line and prints a verdict. If you have to flip it, negate `MAGNETIC_DECLINATION` too.
+
+### Runtime keys
+
+`d` raw NMEA · `v` CSV output · `z` reset the navigation filter · `r` 10 Hz GNSS · `s` 1 Hz GNSS · `h` help
+
+---
+
 ## Calibration Guide
 
 To achieve professional-grade results, calibrate the sensors.
