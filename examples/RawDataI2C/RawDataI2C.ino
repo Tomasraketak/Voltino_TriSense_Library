@@ -1,5 +1,5 @@
 /*
- * Example: RawDataI2C.ino (Updated for v1.2.0)
+ * Example: RawDataI2C.ino (Updated for v1.3.0)
  *
  * Description:
  * Example of reading raw physical data (without extra calibration)
@@ -62,7 +62,13 @@ void loop() {
 
       Serial.print(" | Baro: ");
       Serial.print(data.pressure); Serial.print(" Pa, ");
-      Serial.print(data.temperature); Serial.println(" C");
+      Serial.print(data.temperature); Serial.print(" C");
+
+      // Altitude needs a sea-level reference pressure in PASCALS (not hPa).
+      // 101325.0 Pa is the ISA standard day; substitute your local QNH
+      // (hPa from a weather report x 100) for an accurate absolute altitude.
+      Serial.print(" | Alt: ");
+      Serial.print(sensor.readAltitude(101325.0f), 1); Serial.println(" m");
     }
   }
 }

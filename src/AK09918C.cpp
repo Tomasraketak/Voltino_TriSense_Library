@@ -143,6 +143,22 @@ bool AK09918C::readData() {
   return true;
 }
 
+// Tilt-compensated heading: rotates the horizontal-plane magnetic field
+// components into the level frame using the current roll/pitch, then takes
+// the arctangent of the result (see AK09918C.h for parameter meaning).
+float AK09918C::computeHeading(float mx, float my, float mz, float rollDeg, float pitchDeg, float declinationDeg) {
+  float phi = rollDeg * PI / 180.0f;
+  float theta = pitchDeg * PI / 180.0f;
+
+  float by = my * cos(phi) - mz * sin(phi);
+  float bx = mx * cos(theta) + my * sin(theta) * sin(phi) + mz * sin(theta) * cos(phi);
+
+  float heading = atan2(-by, bx) * 180.0f / PI + declinationDeg;
+  if (heading < 0) heading += 360.0f;
+  if (heading >= 360.0f) heading -= 360.0f;
+  return heading;
+}
+
 void AK09918C::writeRegister(uint8_t reg, uint8_t val) {
   _wire->beginTransmission(AK09918_I2C_ADDR);
   _wire->write(reg);

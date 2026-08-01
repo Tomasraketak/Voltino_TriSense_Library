@@ -62,6 +62,14 @@ public:
   // Hardware reset
   void softReset();
 
+  // Tilt-compensated magnetic heading (0-360 deg, 0 = magnetic/true North).
+  // Pass in already hard/soft-iron calibrated field components (uT) plus the
+  // current roll/pitch (deg, e.g. from TriSenseFusion::getOrientationDegrees())
+  // and an optional magnetic declination (deg) to get true-north heading.
+  // Stateless helper - does not depend on any AK09918C instance/reading, so it
+  // can also be used to sanity-check a fusion's yaw against the raw magnetometer.
+  static float computeHeading(float mx, float my, float mz, float rollDeg, float pitchDeg, float declinationDeg = 0.0f);
+
   // Public variables for direct access (Units: uT)
   float x = 0.0f;
   float y = 0.0f;

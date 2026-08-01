@@ -110,7 +110,33 @@ void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
   }
 }
 
+// Hard iron is a fixed offset in the sensor's physical axes and soft iron a
+// linear distortion in those same axes - both are properties of the sensor and
+// whatever magnetic junk is mounted next to it. So they must be removed while
+// the reading is still in sensor axes; only the corrected, physically-real
+// field vector may then be rotated into the mount frame.
+//
+// Doing it the other way round (remap first) silently applies each hard-iron
+// offset to the wrong axis for every orientation except ORIENTATION_Z_UP, where
+// remapAxes() happens to be the identity. The result is an off-centre locus in
+// the horizontal plane, which makes heading sensitivity vary with direction.
+void TriSenseFusion::applyMagCalibration(float rawX, float rawY, float rawZ,
+                                         FUSION_MATH_TYPE& mx, FUSION_MATH_TYPE& my, FUSION_MATH_TYPE& mz) {
+  FUSION_MATH_TYPE hx = (FUSION_MATH_TYPE)rawX - magHardIron[0];
+  FUSION_MATH_TYPE hy = (FUSION_MATH_TYPE)rawY - magHardIron[1];
+  FUSION_MATH_TYPE hz = (FUSION_MATH_TYPE)rawZ - magHardIron[2];
+
+  float cx = (float)(magSoftIron[0][0]*hx + magSoftIron[0][1]*hy + magSoftIron[0][2]*hz);
+  float cy = (float)(magSoftIron[1][0]*hx + magSoftIron[1][1]*hy + magSoftIron[1][2]*hz);
+  float cz = (float)(magSoftIron[2][0]*hx + magSoftIron[2][1]*hy + magSoftIron[2][2]*hz);
+
+  remapAxes(cx, cy, cz); // Rotate the CALIBRATED vector into the mount frame
+
+  mx = (FUSION_MATH_TYPE)cx; my = (FUSION_MATH_TYPE)cy; mz = (FUSION_MATH_TYPE)cz;
+}
+
 void TriSenseFusion::setDynamicGyroBias(bool enable, float ki) { _dynamicBiasEnabled = enable; _biasKi = ki; }
+void TriSenseFusion::setMaxGyroBias(float maxDps) { _maxGyroBiasDps = (maxDps < 0.0f) ? -maxDps : maxDps; }
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) { accRef = ref; accSigma = sigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma, float tiltSigma) { magRef = ref; magSigma = sigma; magTiltSigmaDeg = tiltSigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma) { magRef = ref; magSigma = sigma; }
@@ -189,18 +215,10 @@ void TriSenseFusion::initOrientation(int samples) {
          FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
          axSum+=ax; aySum+=ay; azSum+=az;
          
-         float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-         remapAxes(mxr, myr, mzr);
-         
-         FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-         FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-         FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-         
-         FUSION_MATH_TYPE mx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-         FUSION_MATH_TYPE my = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-         FUSION_MATH_TYPE mz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
-         
-         mxSum+=mx; mySum+=my; mzSum+=mz; 
+         FUSION_MATH_TYPE mx, my, mz;
+         applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+
+         mxSum+=mx; mySum+=my; mzSum+=mz;
          count++; 
      } else {
          delay(1); 
@@ -247,7 +265,18 @@ void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw
   if (yaw < 0) yaw += 360.0f; if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
-void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
+// Magnetometer-only heading (tilt-compensated using the fusion's current roll/
+// pitch), independent of the gyro-integrated yaw. Useful for comparing against
+// getOrientationDegrees()'s yaw to spot magnetic interference or bad calibration.
+// Requires the magnetometer to have been read at least once (AdvancedTriFusion
+// does this automatically; SimpleTriFusion never reads it, so lastMx/My/Mz stay 0).
+float TriSenseFusion::getMagHeadingDegrees() {
+  float roll, pitch, yaw;
+  getOrientationDegrees(roll, pitch, yaw);
+  return AK09918C::computeHeading((float)lastMx, (float)lastMy, (float)lastMz, roll, pitch, magneticDeclination);
+}
+
+void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
                                          FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                          FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {
   roll  = atan2(ay, az) * 180.0 / PI; pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / PI;
@@ -393,6 +422,11 @@ bool SimpleTriFusion::update() {
         if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
         if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
+        // Accumulate every packet so lastA*/lastG* can publish the batch mean
+        // instead of only the final sample (see note after the loop).
+        FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+        FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+
         for(int i = 0; i < packetCount; i++) {
             float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
             float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
@@ -400,16 +434,23 @@ bool SimpleTriFusion::update() {
             remapAxes(ax_raw, ay_raw, az_raw);
             remapAxes(gx_raw, gy_raw, gz_raw);
 
-            lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-            lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+            FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
+            FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
+            FUSION_MATH_TYPE az = az_raw - accelOffset[2];
+            FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
+            FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
+            FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
 
-            FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gz_rad = lastGz * (FUSION_MATH_TYPE)PI/180.0;
+            sumAx += ax; sumAy += ay; sumAz += az;
+            sumGx += gx; sumGy += gy; sumGz += gz;
+
+            FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
 
             if (_lightweightGravityEnabled) {
-                FUSION_MATH_TYPE norm = invSqrt(lastAx*lastAx + lastAy*lastAy + lastAz*lastAz);
-                FUSION_MATH_TYPE ax_n = lastAx * norm, ay_n = lastAy * norm, az_n = lastAz * norm;
+                FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
+                FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
                 FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
                 FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
                 FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
@@ -417,10 +458,17 @@ bool SimpleTriFusion::update() {
                 gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
                 gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
             }
-            
+
             gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
             trackUpdateRate();
         }
+
+        // Publish the mean of the whole batch rather than just the final packet,
+        // so getGlobalAcceleration() sees every accelerometer sample the FIFO
+        // delivered. The per-sample values above still drive the integration.
+        FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
+        lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
+        lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
     }
   }
   return dataProcessed;
@@ -469,15 +517,24 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   if (delta_yaw_deg > 180.0) delta_yaw_deg -= 360.0; if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
   FUSION_MATH_TYPE delta_yaw_rad = delta_yaw_deg * (FUSION_MATH_TYPE)PI / 180.0;
   
-  if (lastDeltaYawRad * delta_yaw_rad < 0.0) gyroBias[2] = 0.0; 
-  lastDeltaYawRad = delta_yaw_rad;
-  
   if (_dynamicBiasEnabled) {
       gyroBias[0] -= (FUSION_MATH_TYPE)_biasKi * ex * final_accel_gain * correction_dt * 57.29578;
       gyroBias[1] -= (FUSION_MATH_TYPE)_biasKi * ey * final_accel_gain * correction_dt * 57.29578;
   }
-  gyroBias[2] -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
-  
+  // gyroBias[] is subtracted from lastGx/y/z, which are in dps, so the radian
+  // yaw error has to be converted to degrees here - the same 57.29578 factor
+  // the X/Y terms above already apply.
+  gyroBias[2] -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt * 57.29578;
+
+  // Anti-windup: bound the learned bias. The previous implementation zeroed
+  // gyroBias[2] whenever the yaw error changed sign, but near convergence the
+  // error oscillates about zero, so the accumulator was wiped on almost every
+  // correction and could never settle on the steady-state bias it exists to find.
+  for (int i = 0; i < 3; i++) {
+    if (gyroBias[i] >  (FUSION_MATH_TYPE)_maxGyroBiasDps) gyroBias[i] =  (FUSION_MATH_TYPE)_maxGyroBiasDps;
+    if (gyroBias[i] < -(FUSION_MATH_TYPE)_maxGyroBiasDps) gyroBias[i] = -(FUSION_MATH_TYPE)_maxGyroBiasDps;
+  }
+
   FUSION_MATH_TYPE w_x = final_accel_gain * ex * correction_dt; 
   FUSION_MATH_TYPE w_y = final_accel_gain * ey * correction_dt; 
   FUSION_MATH_TYPE w_z = final_mag_gain * delta_yaw_rad * correction_dt;
@@ -521,14 +578,7 @@ bool AdvancedTriFusion::update() {
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-          remapAxes(mxr, myr, mzr);
-          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
@@ -575,6 +625,11 @@ bool AdvancedTriFusion::update() {
       if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
       if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
+      // Accumulate every packet so lastA*/lastG* can publish the batch mean
+      // instead of only the final sample (see note after the loop).
+      FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+      FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+
       for(int i = 0; i < packetCount; i++) {
           float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
           float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
@@ -582,28 +637,37 @@ bool AdvancedTriFusion::update() {
           remapAxes(ax_raw, ay_raw, az_raw);
           remapAxes(gx_raw, gy_raw, gz_raw);
 
-          lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-          lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
+          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
+          FUSION_MATH_TYPE az = az_raw - accelOffset[2];
+          FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
+          FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
+          FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
 
-          gyroIntegration((lastGx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0, 
-                          (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
-                          (lastGz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
+          sumAx += ax; sumAy += ay; sumAz += az;
+          sumGx += gx; sumGy += gy; sumGz += gz;
+
+          gyroIntegration((gx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0,
+                          (gy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0,
+                          (gz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
           trackUpdateRate();
       }
-      
+
+      // Publish the mean of the whole batch. Previously lastA* was overwritten
+      // every iteration, so getGlobalAcceleration() only ever saw the final
+      // packet - at 8kHz ODR read at 50Hz that discarded ~99% of the samples.
+      // Averaging keeps every sample and low-passes vibration, which also makes
+      // the gravity estimate fed to complementaryCorrection() below steadier.
+      FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
+      lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
+      lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
+
       // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
-          remapAxes(mxr, myr, mzr);
-          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
-          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;

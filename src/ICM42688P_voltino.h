@@ -11,9 +11,10 @@
 #define ICM42688_REG_TEMP_DATA1    0x1D
 #define ICM42688_REG_ACCEL_DATA_X1 0x1F
 #define ICM42688_REG_GYRO_DATA_X1  0x25
-#define ICM42688_REG_FIFO_COUNTH   0x2E 
-#define ICM42688_REG_FIFO_COUNTL   0x2F 
-#define ICM42688_REG_FIFO_DATA     0x30 
+#define ICM42688_REG_INT_STATUS    0x2D // Read-to-clear; bit 1 = FIFO_FULL
+#define ICM42688_REG_FIFO_COUNTH   0x2E
+#define ICM42688_REG_FIFO_COUNTL   0x2F
+#define ICM42688_REG_FIFO_DATA     0x30
 #define ICM42688_REG_SIGNAL_PATH_RESET 0x4B // [VOLTINO FIX] Added for FIFO flushing
 #define ICM42688_REG_TMST_CONFIG   0x54
 #define ICM42688_REG_APEX_CONFIG0  0x56
@@ -31,6 +32,12 @@
 #define ICM_ADDR_PRIMARY 0x68
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
+
+// Bit 1 in both INT_STATUS (FIFO_FULL_INT) and INT_SOURCE0 (FIFO_FULL_INT1_EN).
+#define ICM42688_BIT_FIFO_FULL 0x02
+
+// Hardware FIFO is 2 KB: 128 x 16-byte packets, or 102 x 20-byte packets.
+#define ICM42688_FIFO_BYTES 2048
 
 enum ICM_BUS {
   BUS_I2C,
@@ -97,7 +104,20 @@ public:
 
   // [VOLTINO FIX] New rescue function added to header!
   void flushFIFO();
-  
+
+  // --- FIFO overflow monitoring ---
+  // The hardware FIFO holds 2 KB. If the sketch does not drain it fast enough
+  // the sensor discards new samples, and dropped packets are rotation that can
+  // never be integrated - a permanent attitude error. The driver latches the
+  // hardware FIFO_FULL flag on every buffer refill and counts the events.
+  // NOTHING is printed from the library: poll these from your sketch instead.
+  // Note: this reads INT_STATUS once per FIFO refill, and that register is
+  // read-to-clear - so if your sketch also drives the INT pins and inspects
+  // INT_STATUS itself, expect the driver to have consumed the flags first.
+  bool fifoOverflowed();            // True if an overflow occurred since the last call (self-clearing)
+  uint32_t getFIFOOverflowCount();  // Total overflow events since boot / last reset
+  void resetFIFOOverflowCount();
+
   // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   float readTemperature();
@@ -154,6 +174,29 @@ private:
   float gyrOffset[3] = {0,0,0};
   float accOffset[3] = {0,0,0};
   float accScale[3]  = {1,1,1};
+
+  // --- FIFO burst buffer ---
+  // readFIFO() still hands out one packet per call, but the bytes are fetched
+  // from the sensor a whole burst at a time: one FIFO_COUNT read plus one bulk
+  // FIFO_DATA read serve up to FIFO_BURST_PACKETS packets, instead of two bus
+  // transactions per single packet.
+  static const uint8_t FIFO_MAX_PACKET_SIZE = 20;
+#if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+  static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B buffer
+#else
+  static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B buffer
+#endif
+  uint8_t _fifoBuf[FIFO_BURST_PACKETS * FIFO_MAX_PACKET_SIZE];
+  uint8_t _fifoBufCount = 0;   // Packets currently held in _fifoBuf
+  uint8_t _fifoBufIndex = 0;   // Next packet to hand out
+  uint8_t _fifoPacketSize = 16;
+
+  bool _fifoOverflowFlag = false;
+  uint32_t _fifoOverflowCount = 0;
+
+  uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
+  void readFIFOBytes(uint8_t *buf, size_t len);    // Bulk FIFO_DATA read (chunked on I2C)
+  void invalidateFIFOBuffer();
 
   void writeRegister(uint8_t reg, uint8_t val);
   uint8_t readRegister(uint8_t reg);

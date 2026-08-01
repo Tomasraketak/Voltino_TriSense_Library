@@ -1,5 +1,5 @@
 /*
- * Example: CustomPins.ino (Voltino TriSense v1.2.0)
+ * Example: CustomPins.ino (Voltino TriSense v1.3.0)
  *
  * Description:
  * Shows how to route the ICM-42688-P (SPI) and the AK09918C / BMP580 (I2C)
@@ -27,6 +27,8 @@
  *   - setDynamicGyroBias()  -> continuous in-flight gyro drift learning
  *   - getGlobalLinearAcceleration() -> world-frame acceleration with gravity removed
  *   - getActualFusionHz()   -> measured update rate of the fusion loop
+ *   - getMagHeadingDegrees() -> tilt-compensated magnetometer-only heading
+ *   - fifoOverflowed()      -> detect dropped IMU packets
  */
 
 #include <Arduino.h>
@@ -142,11 +144,16 @@ void setup() {
 void loop() {
   if (fusion.update()) {
     unsigned long now = millis();
-    if (now - lastPrintTime >= 20) { // 50Hz output
+    if (now - lastPrintTime >= 50) { // 20Hz output
       lastPrintTime = now;
 
       float roll, pitch, yaw;
       fusion.getOrientationDegrees(roll, pitch, yaw);
+
+      // Magnetometer-only heading (tilt-compensated, no gyro integration) -
+      // handy to compare against the fused yaw above to catch magnetic
+      // interference or a bad hard/soft-iron calibration.
+      float yawMagOnly = fusion.getMagHeadingDegrees();
 
       // World-frame acceleration, gravity included / removed, in m/s^2.
       float gAx, gAy, gAz;
@@ -158,6 +165,7 @@ void loop() {
       Serial.print("Roll:"); Serial.print(roll, 1);
       Serial.print(" Pitch:"); Serial.print(pitch, 1);
       Serial.print(" Yaw:"); Serial.print(yaw, 1);
+      Serial.print(" Yaw_MagOnly:"); Serial.print(yawMagOnly, 1);
 
       Serial.print(" | GlobalAcc(m/s^2) X:"); Serial.print(gAx, 3);
       Serial.print(" Y:"); Serial.print(gAy, 3);
@@ -167,7 +175,15 @@ void loop() {
       Serial.print(" Y:"); Serial.print(glAy, 3);
       Serial.print(" Z:"); Serial.print(glAz, 3);
 
-      Serial.print(" | FusionHz:"); Serial.println(fusion.getActualFusionHz(), 1);
+      Serial.print(" | FusionHz:"); Serial.print(fusion.getActualFusionHz(), 1);
+
+      // Dropped FIFO packets are unrecoverable lost rotation - surface them.
+      if (sensor.imu.fifoOverflowed()) {
+        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(")");
+      }
+      Serial.println();
     }
   }
 }
