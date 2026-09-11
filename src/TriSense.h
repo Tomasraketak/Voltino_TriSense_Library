@@ -177,6 +177,7 @@ class TriSenseFusion {
 protected:
   TriSenseOrientation _mountOrientation = ORIENTATION_Z_UP;
   void remapAxes(float& x, float& y, float& z);
+  void unremapAxes(float& x, float& y, float& z);
 
   // Applies hard-iron then soft-iron in the magnetometer's OWN axes, and only
   // then remaps into the mount frame. The order is not interchangeable: a
@@ -200,8 +201,14 @@ public:
   FUSION_MATH_TYPE lastGx = 0, lastGy = 0, lastGz = 0;
   FUSION_MATH_TYPE lastMx = 0, lastMy = 0, lastMz = 0;
   
-  float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
-  float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
+  // NOTE: the fusion layer no longer stores an accel/gyro bias of its own. It
+  // used to, applied AFTER remapAxes() (i.e. in the mount frame) while the
+  // driver applied its own in the sensor's axes - so populating both subtracted
+  // the bias twice, and a value read from a driver getter landed on the wrong
+  // axis for every orientation but ORIENTATION_Z_UP. Calibration now lives in
+  // one place only: ICM42688P's accOffset / accScale / gyrOffset, all in SENSOR
+  // axes, applied before the mount remap. Use setGyroOffsets() (forwards to the
+  // driver) or the driver's own setters, and read back with its getters.
   
   // Dynamic Gyro Bias (In-flight drift correction). Units: dps, matching lastGx/y/z.
   FUSION_MATH_TYPE gyroBias[3] = {0.0, 0.0, 0.0};
@@ -247,6 +254,12 @@ public:
   void setMountOrientation(TriSenseOrientation orientation);
   float getActualFusionHz(); 
   
+  // One-point gravity calibration: hold the board still, any face up. Refines
+  // the driver's accelerometer offset (in sensor axes) - it does NOT touch the
+  // scale factors, so it is the quick alternative to the 6-point
+  // ICM42688P::autoCalibrateAccel(), not a replacement for it. Both write the
+  // same storage, so the later call refines the earlier one instead of
+  // silently stacking on top of it.
   void calibrateAccelStatic(int samples = DEFAULT_CALIBRATION_SAMPLES);
   void initOrientation(int samples = DEFAULT_CALIBRATION_SAMPLES);
   
@@ -266,6 +279,10 @@ public:
   void setMagTiltSigma(float sigmaDeg);                         
   void setMagCalibration(float hardIron[3], float softIron[3][3]);
   void setDeclination(float deg);
+  // Gyro bias in the SENSOR's own axes (dps), stored in the driver. Matches
+  // what ICM42688P::autoCalibrateGyro() computes and getGyroOffset() reports,
+  // so a value saved to EEPROM can be restored through either, at any mount
+  // orientation.
   void setGyroOffsets(float x, float y, float z);
   void setMagHardIron(float x, float y, float z);
   void setMagSoftIron(float matrix[3][3]);

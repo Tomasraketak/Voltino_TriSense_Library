@@ -235,6 +235,28 @@ void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
   }
 }
 
+// Exact inverse of remapAxes(). Every orientation above is a signed permutation
+// of the axes, so the inverse is another signed permutation - no numerics, no
+// error. Used to express a correction that was worked out in the mount frame
+// back in the sensor's own axes, which is where all calibration is stored.
+void TriSenseFusion::unremapAxes(float& x, float& y, float& z) {
+  float tx = x, ty = y, tz = z;
+  switch (_mountOrientation) {
+    case ORIENTATION_X_UP:
+      x = tz; y = ty; z = -tx;
+      break;
+    case ORIENTATION_Y_UP:
+      x = tx; y = tz; z = -ty;
+      break;
+    case ORIENTATION_Z_DOWN:
+      x = -tx; y = ty; z = -tz;
+      break;
+    case ORIENTATION_Z_UP:
+    default:
+      break;
+  }
+}
+
 // Hard iron is a fixed offset in the sensor's physical axes and soft iron a
 // linear distortion in those same axes - both are properties of the sensor and
 // whatever magnetic junk is mounted next to it. So they must be removed while
@@ -271,7 +293,13 @@ void TriSenseFusion::setMagCalibration(float hard[3], float soft[3][3]) {
   for(int i=0; i<3; i++) for(int j=0; j<3; j++) magSoftIron[i][j] = soft[i][j];
 }
 void TriSenseFusion::setDeclination(float deg) { magneticDeclination = deg; }
-void TriSenseFusion::setGyroOffsets(float x, float y, float z) { gyroOffset[0] = x; gyroOffset[1] = y; gyroOffset[2] = z; }
+// Forwards to the driver, so there is exactly one place a gyro bias is stored.
+// The values are in the SENSOR's own axes - the same axes the driver's
+// autoCalibrateGyro() and getGyroOffset() use - so a bias read back from the
+// driver (or restored from EEPROM) can be handed straight back here regardless
+// of the mount orientation. The mount remap happens afterwards, on the already
+// bias-corrected sample.
+void TriSenseFusion::setGyroOffsets(float x, float y, float z) { if (_imu) _imu->setGyroOffset(x, y, z); }
 void TriSenseFusion::setMagHardIron(float x, float y, float z) { magHardIron[0] = x; magHardIron[1] = y; magHardIron[2] = z; }
 void TriSenseFusion::setMagSoftIron(float matrix[3][3]) { for(int i=0; i<3; i++) for(int j=0; j<3; j++) magSoftIron[i][j] = matrix[i][j]; }
 void TriSenseFusion::setYawKi(float ki) { yawKi = ki; }
@@ -303,19 +331,47 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   float avgY = (float)(sumY / samples);
   float avgZ = (float)(sumZ / samples);
   
+  // Which axis is pointing up can only be decided in the MOUNT frame, so the
+  // residual is worked out here, exactly as before: the up axis should read
+  // 1 g and every other axis 0 g.
+  float dx, dy, dz;
   if (abs(avgZ) > 0.7f) {
-    accelOffset[0] = avgX; accelOffset[1] = avgY;
-    accelOffset[2] = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
+    dx = avgX; dy = avgY;
+    dz = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
   } else if (abs(avgX) > 0.7f) {
-    accelOffset[0] = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
-    accelOffset[1] = avgY; accelOffset[2] = avgZ;
+    dx = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
+    dy = avgY; dz = avgZ;
   } else if (abs(avgY) > 0.7f) {
-    accelOffset[0] = avgX;
-    accelOffset[1] = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
-    accelOffset[2] = avgZ;
+    dx = avgX;
+    dy = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
+    dz = avgZ;
   } else {
-    accelOffset[0] = avgX; accelOffset[1] = avgY; accelOffset[2] = avgZ - 1.0f; 
+    dx = avgX; dy = avgY; dz = avgZ - 1.0f; 
   }
+
+  // ...and then rotated back into the sensor's own axes, because that is the
+  // one place an accelerometer bias is stored (the driver's accOffset). Storing
+  // it in the mount frame instead is what used to make this calibration and the
+  // driver's autoCalibrateAccel() subtract on top of each other.
+  unremapAxes(dx, dy, dz);
+
+  if (!_imu) return;
+
+  // Fold the residual into the offset the driver already holds. The driver
+  // computes (raw - offset) * scale, so a correction of `d` on its OUTPUT costs
+  // d/scale on the offset. Reusing the existing offset (rather than replacing
+  // it) is what makes this callable a second time to refine a previous run.
+  float ox, oy, oz, sx, sy, sz;
+  _imu->getAccelOffset(ox, oy, oz);
+  _imu->getAccelScale(sx, sy, sz);
+
+  // A zero scale would mean the axis is dead anyway; leave its offset alone
+  // rather than dividing by zero and poisoning it with an infinity.
+  if (sx != 0.0f) ox += dx / sx;
+  if (sy != 0.0f) oy += dy / sy;
+  if (sz != 0.0f) oz += dz / sz;
+
+  _imu->setAccelOffset(ox, oy, oz);
 }
 
 void TriSenseFusion::initOrientation(int samples) {
@@ -335,9 +391,9 @@ void TriSenseFusion::initOrientation(int samples) {
 
      if(imuReady) {
          remapAxes(ax_raw, ay_raw, az_raw);
-         FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
-         FUSION_MATH_TYPE ay = ay_raw - accelOffset[1]; 
-         FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
+         FUSION_MATH_TYPE ax = ax_raw; 
+         FUSION_MATH_TYPE ay = ay_raw; 
+         FUSION_MATH_TYPE az = az_raw; 
          axSum+=ax; aySum+=ay; azSum+=az;
          
          FUSION_MATH_TYPE mx, my, mz;
@@ -482,8 +538,8 @@ bool SimpleTriFusion::update() {
       remapAxes(ax_raw, ay_raw, az_raw);
       remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2]; 
-      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw; lastAy = ay_raw; lastAz = az_raw; 
+      lastGx = gx_raw;  lastGy = gy_raw;  lastGz = gz_raw;
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
@@ -544,12 +600,12 @@ bool SimpleTriFusion::update() {
         remapAxes(ax_raw, ay_raw, az_raw);
         remapAxes(gx_raw, gy_raw, gz_raw);
 
-        FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
-        FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
-        FUSION_MATH_TYPE az = az_raw - accelOffset[2];
-        FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
-        FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
-        FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
+        FUSION_MATH_TYPE ax = ax_raw;
+        FUSION_MATH_TYPE ay = ay_raw;
+        FUSION_MATH_TYPE az = az_raw;
+        FUSION_MATH_TYPE gx = gx_raw;
+        FUSION_MATH_TYPE gy = gy_raw;
+        FUSION_MATH_TYPE gz = gz_raw;
 
         sumAx += ax; sumAy += ay; sumAz += az;
         sumGx += gx; sumGy += gy; sumGz += gz;
@@ -675,8 +731,8 @@ bool AdvancedTriFusion::update() {
       remapAxes(ax_raw, ay_raw, az_raw);
       remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw; lastAy = ay_raw; lastAz = az_raw;
+      lastGx = gx_raw;  lastGy = gy_raw;  lastGz = gz_raw;
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
@@ -738,12 +794,12 @@ bool AdvancedTriFusion::update() {
         remapAxes(ax_raw, ay_raw, az_raw);
         remapAxes(gx_raw, gy_raw, gz_raw);
 
-        FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
-        FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
-        FUSION_MATH_TYPE az = az_raw - accelOffset[2];
-        FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
-        FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
-        FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
+        FUSION_MATH_TYPE ax = ax_raw;
+        FUSION_MATH_TYPE ay = ay_raw;
+        FUSION_MATH_TYPE az = az_raw;
+        FUSION_MATH_TYPE gx = gx_raw;
+        FUSION_MATH_TYPE gy = gy_raw;
+        FUSION_MATH_TYPE gz = gz_raw;
 
         sumAx += ax; sumAy += ay; sumAz += az;
         sumGx += gx; sumGy += gy; sumGz += gz;

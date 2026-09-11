@@ -565,12 +565,34 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
 | `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
 | `readTemperature()` | Read internal IMU temperature |
-| `setAccelOffset(x, y, z)` | Set software accelerometer offsets |
-| `setAccelScale(x, y, z)` | Set software accelerometer scale factors |
-| `setGyroOffset(x, y, z)` | Set software gyroscope offsets |
+| `setAccelOffset(x, y, z)` | Set software accelerometer offsets (**sensor axes**) |
+| `setAccelScale(x, y, z)` | Set software accelerometer scale factors (**sensor axes**) |
+| `setGyroOffset(x, y, z)` | Set software gyroscope offsets (**sensor axes**) |
 | `getODRHz()` | Get current ODR in Hz |
 | `autoCalibrateGyro(samples)` | Auto-calibrate gyroscope bias |
 | `autoCalibrateAccel()` | 6-point sphere fit calibration |
+
+> **Where calibration lives.** All accelerometer and gyroscope offsets/scales are
+> stored in one place — the `ICM42688P` driver — and are always expressed in the
+> **sensor's own axes**, applied to the raw sample before the mount remap:
+>
+> ```
+> accel_out = (accel_raw - accOffset) * accScale
+> gyro_out  =  gyro_raw  - gyrOffset
+> ```
+>
+> So a value you read with `getAccelOffset()` / `getGyroOffset()` and save to
+> EEPROM can be handed straight back to the matching setter at **any**
+> `setMountOrientation()` setting. `TriSenseFusion::setGyroOffsets()` and
+> `calibrateAccelStatic()` forward into this same storage, so calibrations
+> refine each other instead of stacking.
+>
+> *Changed in 1.5.0:* the fusion layer used to keep a second set of offsets
+> applied after the mount remap. Setting both subtracted the bias twice, and a
+> driver value fed into the fusion setter landed on the wrong axis for every
+> orientation except `ORIENTATION_Z_UP`. The fusion-layer `accelOffset[]` /
+> `gyroOffset[]` fields are gone; code touching them directly will no longer
+> compile, which is deliberate — a silent no-op would be worse.
 
 ### `BMP580` Class
 
@@ -608,7 +630,7 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | Method | Description |
 |--------|-------------|
 | `initOrientation(samples)` | Initialize quaternion from initial accel/mag readings |
-| `calibrateAccelStatic(samples)` | Simple static gravity offset calibration |
+| `calibrateAccelStatic(samples)` | 1-point gravity calibration; refines the driver's accel offset (**sensor axes**) |
 | `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
 | `getMagHeadingDegrees()` | Tilt-compensated, magnetometer-only heading (0–360°), independent of the fused/gyro yaw |
 | `getGlobalAcceleration(x, y, z, unit)` | World-frame acceleration, **gravity included** (batch-averaged, see above) |

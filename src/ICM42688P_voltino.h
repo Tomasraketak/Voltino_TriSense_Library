@@ -152,8 +152,20 @@ public:
   // programs those registers, applying accel/gyro bias in software instead (see
   // setAccelOffset / setGyroOffset), so they stay at their power-on zero anyway.
   void resetHardwareOffsets();
-  void autoCalibrateGyro(uint16_t samples = 750);
-  void autoCalibrateAccel(); 
+  // --- Calibration storage ---
+  // Every offset and scale below is expressed in the SENSOR's OWN axes and is
+  // applied to the raw sample before anything else sees it:
+  //
+  //     accel_out = (accel_raw - accOffset) * accScale
+  //     gyro_out  =  gyro_raw  - gyrOffset
+  //
+  // This is deliberately the ONLY place an accel/gyro bias is stored. The
+  // fusion layer's mount remap (TriSenseFusion::setMountOrientation) happens
+  // afterwards, on the already-corrected sample, so a value produced by one of
+  // the getters below can be saved and restored through the matching setter at
+  // any mount orientation.
+  void autoCalibrateGyro(uint16_t samples = 750);   // Board still -> gyrOffset
+  void autoCalibrateAccel();                        // 6-point sphere fit -> accOffset + accScale
   
   void setGyroSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareOffset(float ox, float oy, float oz);
