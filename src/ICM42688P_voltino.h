@@ -111,6 +111,13 @@ public:
   // [VOLTINO FIX] New rescue function added to header!
   void flushFIFO();
 
+  // How many packets readFIFO() can hand out right now: whatever is still held
+  // in the software burst buffer, plus whatever the hardware FIFO reports.
+  // Costs one FIFO_COUNT read. Lets a caller size a batch BEFORE draining it,
+  // so it can work out the per-sample dt without buffering the packets first.
+  // Returns 1 in FIFO_NONE mode (a direct register read always has "one" sample).
+  uint16_t availablePackets();
+
   // --- FIFO overflow monitoring ---
   // The hardware FIFO holds 2 KB. If the sketch does not drain it fast enough
   // the sensor discards new samples, and dropped packets are rotation that can

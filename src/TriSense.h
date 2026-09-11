@@ -232,6 +232,7 @@ public:
   FUSION_MATH_TYPE _realDt = 0.001; 
 
   FUSION_MATH_TYPE invSqrt(FUSION_MATH_TYPE x);
+  void clampSampleDt(FUSION_MATH_TYPE& dt, FUSION_MATH_TYPE ideal_dt);
   FUSION_MATH_TYPE gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma);
   void gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt);
   void getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 

@@ -317,6 +317,23 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   enforceBandwidthLimit();
 }
 
+uint16_t ICM42688P::availablePackets() {
+  if (_fifoMode == FIFO_NONE) return 1;
+
+  uint16_t buffered = (_fifoBufIndex < _fifoBufCount) ? (uint16_t)(_fifoBufCount - _fifoBufIndex) : 0;
+  if (_fifoPacketSize == 0) return buffered;
+
+  uint8_t countBuf[2];
+  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
+  uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
+
+  // Same sanity check fillFIFOBuffer() applies: a count above the physical FIFO
+  // size means the read was garbled, so trust only what is already buffered.
+  if (fifoBytes > ICM42688_FIFO_BYTES) return buffered;
+
+  return buffered + (fifoBytes / _fifoPacketSize);
+}
+
 void ICM42688P::flushFIFO() {
   writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02);
   invalidateFIFOBuffer(); // Drop software-buffered packets too - they are now stale
@@ -669,6 +686,14 @@ void ICM42688P::autoCalibrateAccel() {
       float adjZ = (points[i].z - bz) * sz;
       
       float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
+
+      // A zero radius means this point sits exactly at the current centre
+      // estimate - which in practice means the sensor returned all zeros (bus
+      // fault, sensor asleep). Dividing by it produces NaN, and NaN then
+      // propagates into bx/by/bz and sx/sy/sz and silently poisons the whole
+      // calibration with no error message. Skip the point instead.
+      if (radius < 1e-6f) continue;
+
       float error = radius - 1.0f;
       float common = error / radius;
       

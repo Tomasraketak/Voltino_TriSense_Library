@@ -1,0 +1,124 @@
+name: Compile Examples
+
+# Compiles every example for every supported architecture on each push and pull
+# request. The point is to catch the portability breaks that are invisible when
+# you only ever flash one board:
+#
+#   - the FPU / no-FPU split in invSqrt() (TRISENSE_HAS_HW_FPU)
+#   - the AVR-only branches (FIFO_20BIT_HIRES fallback, burst buffer size)
+#   - RAM limits on the small cores - a sketch that no longer fits will fail to
+#     link here rather than misbehave on someone's desk
+#
+# Run it locally with the same tool if you want:
+#   arduino-cli compile --fqbn rp2040:rp2040:rpipico2 examples/AdvancedFusion
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: ${{ matrix.board.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          # --- Primary targets: hardware FPU, full example set ---
+          - name: Raspberry Pi Pico 2 (RP2350)
+            fqbn: rp2040:rp2040:rpipico2
+            platform-name: rp2040:rp2040
+            source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+            libraries: |
+              - source-path: ./
+              - name: TinyGPSPlus
+            sketch-paths: examples
+
+          # RP2040 has no FPU, so this is the one that exercises the bit-trick
+          # invSqrt path on a 32-bit core.
+          - name: Raspberry Pi Pico (RP2040)
+            fqbn: rp2040:rp2040:rpipico
+            platform-name: rp2040:rp2040
+            source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+            libraries: |
+              - source-path: ./
+              - name: TinyGPSPlus
+            sketch-paths: examples
+
+          - name: ESP32
+            fqbn: esp32:esp32:esp32
+            platform-name: esp32:esp32
+            source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            libraries: |
+              - source-path: ./
+            # GPS_INS_Localization is RP2040/RP2350-only by design (setup1()/loop1()
+            # and the Pico SDK mutex API) and #errors out elsewhere.
+            sketch-paths: |
+              examples/AdvancedFusion
+              examples/CustomPins
+              examples/GlobalAcceleration
+              examples/IMUcalibration
+              examples/MotionCal
+              examples/RawDataI2C
+              examples/SimpleFusion
+
+          # --- Cortex-M0+, no FPU: the "other platform" path that used to get
+          #     the 3 KB stack buffer on a 32 KB part. ---
+          - name: Arduino MKR Zero (SAMD21)
+            fqbn: arduino:samd:mkrzero
+            platform-name: arduino:samd
+            source-url: ""
+            libraries: |
+              - source-path: ./
+            sketch-paths: |
+              examples/AdvancedFusion
+              examples/CustomPins
+              examples/GlobalAcceleration
+              examples/IMUcalibration
+              examples/MotionCal
+              examples/RawDataI2C
+              examples/SimpleFusion
+
+          # --- 8-bit AVR: 2 KB RAM. Only the lightweight examples are expected
+          #     to fit; this guards the __AVR__ branches from bit-rot. ---
+          - name: Arduino Uno (AVR)
+            fqbn: arduino:avr:uno
+            platform-name: arduino:avr
+            source-url: ""
+            libraries: |
+              - source-path: ./
+            sketch-paths: |
+              examples/MotionCal
+              examples/RawDataI2C
+              examples/SimpleFusion
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.board.fqbn }}
+          sketch-paths: ${{ matrix.board.sketch-paths }}
+          platforms: |
+            - name: ${{ matrix.board.platform-name }}
+              source-url: ${{ matrix.board.source-url }}
+          libraries: ${{ matrix.board.libraries }}
+          enable-warnings-report: true
+          enable-deltas-report: true
+          verbose: false
+
+  lint:
+    name: Arduino Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checks library.properties, the folder layout, keywords.txt and the other
+      # things the Arduino Library Manager requires before it will index a release.
+      - uses: arduino/arduino-lint-action@v1
+        with:
+          library-manager: update
