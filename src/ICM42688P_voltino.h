@@ -102,7 +102,8 @@ public:
   void setGyroFS(ICM_GYRO_FS fs);
   void setFIFOMode(ICM_FIFO_MODE mode);
   
-  int getODRHz(); 
+  int getODRHz();               // ODR actually in effect (may be below what you asked for)
+  int getRequestedODRHz();      // ODR you asked for via setODR()
   
   // [VOLTINO FIX] Helper method to dynamically adapt fusion integration based on buffer state
   ICM_FIFO_MODE getFIFOMode(); 
@@ -179,6 +180,11 @@ private:
   int8_t _csPin;
   uint8_t _i2cAddr;
   uint32_t _spiFreq;
+  // _requestedOdr is what the sketch asked for; _odr is what the bus can
+  // actually sustain in the current FIFO mode. Keeping them apart lets the
+  // requested rate be restored when the packet size (and so the bandwidth
+  // demand) drops again - see enforceBandwidthLimit().
+  ICM_ODR _requestedOdr;
   ICM_ODR _odr;
   ICM_FIFO_MODE _fifoMode;
   bool _debug;

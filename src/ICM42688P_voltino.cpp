@@ -4,6 +4,8 @@ ICM42688P::ICM42688P() {
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
   _i2cAddr = ICM_ADDR_PRIMARY;
+  _requestedOdr = ODR_1KHZ;
+  _odr = ODR_1KHZ;
   _fifoMode = FIFO_NONE;
   _fifoPacketSize = 16;
   _debug = false;
@@ -163,6 +165,10 @@ int ICM42688P::getODRHz() {
   return _getHzFromODR(_odr);
 }
 
+int ICM42688P::getRequestedODRHz() {
+  return _getHzFromODR(_requestedOdr);
+}
+
 // [VOLTINO FIX] FIFO Helper Method
 ICM_FIFO_MODE ICM42688P::getFIFOMode() {
   return _fifoMode;
@@ -197,9 +203,13 @@ void ICM42688P::enforceBandwidthLimit() {
   uint32_t bitsPerRead = bytesPerRead * bitsPerByte;
   uint32_t maxAllowedBps = (uint32_t)(_spiFreq * 0.8f);
 
+  // Always re-derive from the REQUESTED rate, never from whatever _odr was last
+  // clamped to. Otherwise a downgrade is permanent: switching to a cheaper FIFO
+  // mode later frees bandwidth, but the original request has been forgotten and
+  // the sensor stays stuck at the reduced rate.
   ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
-  ICM_ODR safeODR = _odr;
-  int requestedHz = _getHzFromODR(_odr); 
+  ICM_ODR safeODR = _requestedOdr;
+  int requestedHz = _getHzFromODR(_requestedOdr);
 
   for (int i = 0; i < 12; i++) {
     int targetHz = _getHzFromODR(odrList[i]);
@@ -212,14 +222,17 @@ void ICM42688P::enforceBandwidthLimit() {
     }
   }
 
-  if (safeODR != _odr) {
-    if (_debug) {
-      Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded. Downgrading ODR to "));
-      Serial.print(_getHzFromODR(safeODR));
-      Serial.println(F(" Hz."));
-    }
-    _odr = safeODR; 
+  if (_debug && safeODR != _requestedOdr) {
+    Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded. Downgrading ODR to "));
+    Serial.print(_getHzFromODR(safeODR));
+    Serial.println(F(" Hz."));
   }
+  if (_debug && safeODR != _odr && safeODR == _requestedOdr) {
+    Serial.print(F("Voltino TriSense: bandwidth freed, restoring requested ODR of "));
+    Serial.print(_getHzFromODR(safeODR));
+    Serial.println(F(" Hz."));
+  }
+  _odr = safeODR;
 
   uint8_t odd = (uint8_t)_odr;
   uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
@@ -229,7 +242,7 @@ void ICM42688P::enforceBandwidthLimit() {
 }
 
 void ICM42688P::setODR(ICM_ODR odr) {
-  _odr = odr;
+  _requestedOdr = odr;
   enforceBandwidthLimit();
 }
 
