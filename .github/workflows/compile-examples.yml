@@ -30,8 +30,9 @@ jobs:
           # --- Primary targets: hardware FPU, full example set ---
           - name: Raspberry Pi Pico 2 (RP2350)
             fqbn: rp2040:rp2040:rpipico2
-            platform-name: rp2040:rp2040
-            source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+            platforms: |
+              - name: rp2040:rp2040
+                source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
             libraries: |
               - source-path: ./
               - name: TinyGPSPlus
@@ -41,8 +42,9 @@ jobs:
           # invSqrt path on a 32-bit core.
           - name: Raspberry Pi Pico (RP2040)
             fqbn: rp2040:rp2040:rpipico
-            platform-name: rp2040:rp2040
-            source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+            platforms: |
+              - name: rp2040:rp2040
+                source-url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
             libraries: |
               - source-path: ./
               - name: TinyGPSPlus
@@ -50,8 +52,9 @@ jobs:
 
           - name: ESP32
             fqbn: esp32:esp32:esp32
-            platform-name: esp32:esp32
-            source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            platforms: |
+              - name: esp32:esp32
+                source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
             libraries: |
               - source-path: ./
             # GPS_INS_Localization is RP2040/RP2350-only by design (setup1()/loop1()
@@ -69,8 +72,8 @@ jobs:
           #     the 3 KB stack buffer on a 32 KB part. ---
           - name: Arduino MKR Zero (SAMD21)
             fqbn: arduino:samd:mkrzero
-            platform-name: arduino:samd
-            source-url: ""
+            platforms: |
+              - name: arduino:samd
             libraries: |
               - source-path: ./
             sketch-paths: |
@@ -86,8 +89,8 @@ jobs:
           #     to fit; this guards the __AVR__ branches from bit-rot. ---
           - name: Arduino Uno (AVR)
             fqbn: arduino:avr:uno
-            platform-name: arduino:avr
-            source-url: ""
+            platforms: |
+              - name: arduino:avr
             libraries: |
               - source-path: ./
             sketch-paths: |
@@ -103,9 +106,7 @@ jobs:
         with:
           fqbn: ${{ matrix.board.fqbn }}
           sketch-paths: ${{ matrix.board.sketch-paths }}
-          platforms: |
-            - name: ${{ matrix.board.platform-name }}
-              source-url: ${{ matrix.board.source-url }}
+          platforms: ${{ matrix.board.platforms }}
           libraries: ${{ matrix.board.libraries }}
           enable-warnings-report: true
           enable-deltas-report: true
