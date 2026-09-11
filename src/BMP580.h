@@ -86,8 +86,12 @@ enum BMP580_Mode {
 class BMP580 {
  public:
   BMP580();
-  bool begin(uint8_t addr = BMP580_PRIMARY_I2C_ADDR);
+  // `wire` selects the I2C bus. The TriSense module keeps all of its sensors on
+  // one bus, so this is normally whatever TriSense::beginAll() was given.
+  bool begin(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);
   
+  // NOTE: this retunes the whole I2C bus, not just this device - every sensor
+  // on the module shares it.
   void setI2CSpeed(uint32_t speed); // e.g., 100000, 400000, or 1000000 (Fast Mode Plus)
   void setOversampling(BMP580_OSR osr_p, BMP580_OSR osr_t);
   void setODR(BMP580_ODR odr);
@@ -99,6 +103,7 @@ class BMP580 {
   float readAltitude(float seaLevelPressure = 101325.0f);
 
  private:
+  TwoWire* _wire;
   uint8_t _i2cAddr;
   
   // Smart caching variables

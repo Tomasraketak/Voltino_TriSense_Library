@@ -6,7 +6,6 @@
  * 2. Send commands:
  * 'g' -> Automatic Gyro Calibration (Sensor must be still!)
  * 'a' -> 6-Point Accelerometer Calibration (Sphere fit)
- * 'x' -> Reset all HW offsets (Factory chip bias)
  */
 
 #include <TriSense.h>
@@ -32,7 +31,6 @@ void setup() {
   Serial.println("--------------------------------------");
   Serial.println("[g] -> Calibrate GYRO (Keep still!)");
   Serial.println("[a] -> Calibrate ACCELEROMETER (6 positions)");
-  Serial.println("[x] -> RESET chip offsets");
   Serial.println("--------------------------------------");
 }
 
@@ -45,10 +43,6 @@ void loop() {
     } 
     else if (c == 'a') {
       sensor.autoCalibrateAccel(); 
-    }
-    else if (c == 'x') {
-      sensor.resetHardwareOffsets();
-      Serial.println("Hardware offsets reset to default (0).");
     }
   }
 }

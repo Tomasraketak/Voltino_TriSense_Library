@@ -12,6 +12,8 @@ ICM42688P::ICM42688P() {
 
 void ICM42688P::setDebug(bool enable) { _debug = enable; }
 
+void ICM42688P::setWire(TwoWire &wire) { _wire = &wire; }
+
 bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
   return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
 }
@@ -63,20 +65,20 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   } else {
     #if defined(ESP32) 
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setPins(misoSdaPin, sckSclPin);
+        _wire->setPins(misoSdaPin, sckSclPin);
       }
     #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setSDA(misoSdaPin);
-        Wire.setSCL(sckSclPin);
+        _wire->setSDA(misoSdaPin);
+        _wire->setSCL(sckSclPin);
       }
     #endif
     
-    Wire.begin();
-    Wire.setClock(_spiFreq);
+    _wire->begin();
+    _wire->setClock(_spiFreq);
 
-    Wire.beginTransmission(_i2cAddr);
-    if (Wire.endTransmission() != 0) {
+    _wire->beginTransmission(_i2cAddr);
+    if (_wire->endTransmission() != 0) {
       _i2cAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
     }
   }
@@ -114,11 +116,11 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(startReg);
-    Wire.endTransmission(false);
-    Wire.requestFrom((int)_i2cAddr, (int)len);
-    for(size_t i=0; i<len; i++) buffer[i] = (Wire.available()) ? Wire.read() : 0;
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(startReg);
+    _wire->endTransmission(false);
+    _wire->requestFrom((int)_i2cAddr, (int)len);
+    for(size_t i=0; i<len; i++) buffer[i] = (_wire->available()) ? _wire->read() : 0;
   }
 }
 
@@ -131,10 +133,10 @@ void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg); 
-    Wire.write(data);
-    Wire.endTransmission();
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(reg); 
+    _wire->write(data);
+    _wire->endTransmission();
   }
 }
 
@@ -148,11 +150,11 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg); 
-    Wire.endTransmission(false);
-    Wire.requestFrom((int)_i2cAddr, 1);
-    if (Wire.available()) data = Wire.read();
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(reg); 
+    _wire->endTransmission(false);
+    _wire->requestFrom((int)_i2cAddr, 1);
+    if (_wire->available()) data = _wire->read();
   }
   return data;
 }

@@ -91,6 +91,11 @@ public:
   
   void setDebug(bool enable);
 
+  // Selects the I2C bus for BUS_I2C mode. Must be called BEFORE begin().
+  // Ignored in BUS_SPI mode. The whole TriSense module shares one bus, so
+  // TriSense::beginAll() sets this for you.
+  void setWire(TwoWire &wire);
+
   // --- Configuration ---
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
@@ -129,6 +134,15 @@ public:
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
   // --- Calibration ---
+  // Selects register bank 0, the bank every other call in this driver expects.
+  // Kept as a recovery hook: if a sketch talks to the chip directly and leaves
+  // it parked in bank 1-4, subsequent driver reads would silently return the
+  // wrong registers, and this puts it back.
+  //
+  // It does NOT clear the chip's OFFSET_USER registers (bank 4, 0x77-0x7F) -
+  // the name is historical. In practice nothing needs it to: this driver never
+  // programs those registers, applying accel/gyro bias in software instead (see
+  // setAccelOffset / setGyroOffset), so they stay at their power-on zero anyway.
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = 750);
   void autoCalibrateAccel(); 
@@ -160,6 +174,7 @@ public:
   float getGyroOffsetZ();
 
 private:
+  TwoWire* _wire = &Wire;
   ICM_BUS _bus;
   int8_t _csPin;
   uint8_t _i2cAddr;

@@ -30,17 +30,19 @@ void setup() {
     while (1) delay(100);
   }
 
-  // Clear hardware offsets to see true "factory raw" data
-  sensor.resetHardwareOffsets();
   Serial.println("System Ready. Reading unified snapshot...");
 }
 
 void loop() {
   TriSenseDataSnapshot data;
-  
-  // getSnapshot() fetches synchronous data from IMU, Mag, and Baro at once
+
+  // getSnapshot() always hands back the newest reading of every quantity: it
+  // refreshes whatever the sensors have ready and reuses the last good value
+  // for the rest. The return value is false only until every block has been
+  // read at least once, NOT every time a sensor happens to have no new sample
+  // (the magnetometer runs at 100 Hz, so that is the normal case in this loop).
   if (sensor.getSnapshot(data)) {
-    
+
     if (millis() - lastPrint >= 100) { // Print at 10Hz to avoid serial spam
       lastPrint = millis();
 
@@ -55,10 +57,13 @@ void loop() {
       Serial.print(data.gyroY, 1); Serial.print(", ");
       Serial.print(data.gyroZ, 1);
 
+      // The magnetometer only produces a new sample every 10 ms, so this value
+      // is often a few milliseconds old. magAgeUs says exactly how old.
       Serial.print(" | M [uT]: ");
       Serial.print(data.magX, 1); Serial.print(", ");
       Serial.print(data.magY, 1); Serial.print(", ");
       Serial.print(data.magZ, 1);
+      Serial.print(" (age "); Serial.print(data.magAgeUs / 1000); Serial.print(" ms)");
 
       Serial.print(" | Baro: ");
       Serial.print(data.pressure); Serial.print(" Pa, ");

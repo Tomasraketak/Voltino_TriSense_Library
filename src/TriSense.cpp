@@ -1,14 +1,22 @@
 #include "TriSense.h"
 
-TriSense::TriSense() {}
+TriSense::TriSense() {
+  memset(&_last, 0, sizeof(_last));
+}
 
-bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
+bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
   _mode = mode;
-  Wire.begin();
-  if (!bmp.begin()) return false;
-  if (!mag.begin()) return false;
+  _wire = &wire;
+
+  // One shared bus for the whole module. Started once here, so the individual
+  // drivers never have to guess which TwoWire instance they are on.
+  _wire->begin();
+
+  if (!bmp.begin(BMP580_PRIMARY_I2C_ADDR, *_wire)) return false;
+  if (!mag.begin(AK_ODR_100HZ, *_wire)) return false;
 
   if (_mode == MODE_I2C) {
+    imu.setWire(*_wire);
     if (!imu.begin(BUS_I2C)) return false;
     imu.setODR(DEFAULT_IMU_ODR); 
   } else {
@@ -26,27 +34,81 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
   return true;
 }
 
-bool TriSense::beginBMP(uint8_t addr) { return bmp.begin(addr); }
-bool TriSense::beginMAG() { return mag.begin(); }
-bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq) { return imu.begin(busType, csPin, freq); }
+bool TriSense::beginBMP(uint8_t addr, TwoWire &wire) { _wire = &wire; return bmp.begin(addr, wire); }
+bool TriSense::beginMAG(TwoWire &wire) { _wire = &wire; return mag.begin(AK_ODR_100HZ, wire); }
+bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq, TwoWire &wire) {
+  if (busType == BUS_I2C) { _wire = &wire; imu.setWire(wire); }
+  return imu.begin(busType, csPin, freq);
+}
 
 void TriSense::resetHardwareOffsets() { imu.resetHardwareOffsets(); }
 void TriSense::autoCalibrateGyro(uint16_t samples) { imu.autoCalibrateGyro(samples); }
 void TriSense::autoCalibrateAccel() { imu.autoCalibrateAccel(); }
 
 bool TriSense::getSnapshot(TriSenseDataSnapshot &data) {
-  float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
-  bool imuOk = imu.readFIFO(ax, ay, az, gx, gy, gz);
-  data.accelX = ax; data.accelY = ay; data.accelZ = az;
-  data.gyroX = gx;  data.gyroY = gy;  data.gyroZ = gz;
+  const uint32_t now = micros();
 
-  bool magOk = mag.readData();
-  data.magX = mag.x; data.magY = mag.y; data.magZ = mag.z;
+  // --- IMU ------------------------------------------------------------------
+  // In FIFO mode the oldest queued packet is not what a "snapshot" means, so
+  // drain what is buffered and keep the newest. The loop is bounded twice over:
+  // by the FIFO emptying, and by a hard cap so a misbehaving sensor that always
+  // reports data-ready can never stall the caller.
+  {
+    float ax, ay, az, gx, gy, gz;
+    const bool streaming = (imu.getFIFOMode() != FIFO_NONE);
+    uint16_t guard = streaming ? 256 : 1;   // Direct register reads never "empty"
 
-  data.pressure = bmp.readPressure();
-  data.temperature = bmp.readTemperature();
+    bool got = false;
+    while (guard-- && imu.readFIFO(ax, ay, az, gx, gy, gz)) {
+      _last.accelX = ax; _last.accelY = ay; _last.accelZ = az;
+      _last.gyroX  = gx; _last.gyroY  = gy; _last.gyroZ  = gz;
+      got = true;
+      if (!streaming) break;
+    }
 
-  return imuOk && magOk;
+    if (got) { _haveIMU = true; _lastImuUs = now; }
+    data.imuFresh = got;
+  }
+
+  // --- Magnetometer ---------------------------------------------------------
+  // readData() returns false whenever DRDY is clear, which at 100 Hz ODR is the
+  // common case in a fast loop. That is not an error, it just means "nothing new".
+  {
+    const bool got = mag.readData();
+    if (got) {
+      _last.magX = mag.x; _last.magY = mag.y; _last.magZ = mag.z;
+      _haveMag = true; _lastMagUs = now;
+    }
+    data.magFresh = got;
+  }
+
+  // --- Barometer ------------------------------------------------------------
+  // BMP580 already caches internally against its own ODR, so these calls only
+  // touch the bus when a new conversion is actually ready. Compare against the
+  // previous values to report whether this call saw a new conversion.
+  {
+    const float p = bmp.readPressure();
+    const float t = bmp.readTemperature();
+    const bool got = (!_haveBaro) || (p != _last.pressure) || (t != _last.temperature);
+    if (got) { _haveBaro = true; _lastBaroUs = now; }
+    _last.pressure = p;
+    _last.temperature = t;
+    data.baroFresh = got;
+  }
+
+  // --- Publish --------------------------------------------------------------
+  data.accelX = _last.accelX; data.accelY = _last.accelY; data.accelZ = _last.accelZ;
+  data.gyroX  = _last.gyroX;  data.gyroY  = _last.gyroY;  data.gyroZ  = _last.gyroZ;
+  data.magX   = _last.magX;   data.magY   = _last.magY;   data.magZ   = _last.magZ;
+  data.pressure = _last.pressure;
+  data.temperature = _last.temperature;
+
+  // Unsigned subtraction, so these stay correct across the ~71 min micros() wrap.
+  data.imuAgeUs  = _haveIMU  ? (now - _lastImuUs)  : 0xFFFFFFFFUL;
+  data.magAgeUs  = _haveMag  ? (now - _lastMagUs)  : 0xFFFFFFFFUL;
+  data.baroAgeUs = _haveBaro ? (now - _lastBaroUs) : 0xFFFFFFFFUL;
+
+  return _haveIMU && _haveMag && _haveBaro;
 }
 
 float TriSense::readPressure() { return bmp.readPressure(); }
@@ -71,15 +133,46 @@ float TriSenseFusion::getActualFusionHz() {
   return _actualFusionHz;
 }
 
+// Reciprocal square root - called on every quaternion normalisation, so it sits
+// in the hottest path of the whole fusion loop.
+//
+// Implementation is chosen per platform (see TRISENSE_HAS_HW_FPU in TriSense.h):
+//
+//   * MCU with a hardware FPU (RP2350, ESP32/S3, SAMD51, STM32F4+, nRF52840,
+//     Teensy): sqrtf() is a SINGLE instruction (VSQRT.F32 on ARM), followed by
+//     one divide. On the RP2350 that is ~20 cycles total and exact to the last
+//     bit. The bit-trick below needs ~4 multiplies plus a shift and is both
+//     SLOWER and less accurate there, so it is not used.
+//
+//   * MCU without an FPU (Arduino Uno/Nano/Mega, RP2040, ESP32-C3, SAMD21):
+//     software sqrtf() costs hundreds of cycles, so the classic Quake bit-trick
+//     wins. Two Newton-Raphson steps are used instead of one: the seed alone is
+//     good to ~3.4%, one step to ~1.8e-3, two steps to ~5e-6. The second step
+//     costs 2 multiplies and a subtract, which is cheap insurance given this
+//     result scales the quaternion on EVERY integration step - a systematic
+//     0.18% norm error would otherwise accumulate into the attitude.
+//
+// The bit reinterpretation goes through memcpy rather than a pointer cast.
+// Casting a float* to uint32_t* violates C++ strict aliasing and GCC is free to
+// miscompile it at -O2; memcpy is the well-defined spelling and every compiler
+// lowers it to the same single register move (zero cost).
 FUSION_MATH_TYPE TriSenseFusion::invSqrt(FUSION_MATH_TYPE x) {
 #if defined(FORCE_FUSION_DOUBLE)
   return 1.0 / sqrt(x);
+#elif defined(TRISENSE_HAS_HW_FPU)
+  return (FUSION_MATH_TYPE)(1.0f / sqrtf((float)x));
 #else
-  float xhalf = 0.5f * (float)x;
-  uint32_t i = *(uint32_t*)&x;
+  const float f = (float)x;
+  const float xhalf = 0.5f * f;
+
+  uint32_t i;
+  memcpy(&i, &f, sizeof(i));
   i = 0x5f3759df - (i >> 1);
-  float y = *(float*)&i;
-  y = y * (1.5f - xhalf * y * y);
+
+  float y;
+  memcpy(&y, &i, sizeof(y));
+  y = y * (1.5f - xhalf * y * y);   // Newton step 1 -> ~1.8e-3 worst case
+  y = y * (1.5f - xhalf * y * y);   // Newton step 2 -> ~5e-6 worst case
   return (FUSION_MATH_TYPE)y;
 #endif
 }

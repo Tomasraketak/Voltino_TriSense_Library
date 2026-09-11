@@ -8,11 +8,13 @@
 #define DEFAULT_IIR BMP580_IIR_OFF
 
 BMP580::BMP580() {
+  _wire = &Wire;
   _i2cAddr = BMP580_PRIMARY_I2C_ADDR;
 }
 
-bool BMP580::begin(uint8_t addr) {
-  Wire.begin();
+bool BMP580::begin(uint8_t addr, TwoWire &wire) {
+  _wire = &wire;
+  _wire->begin();
   _i2cAddr = addr;
 
   // Check CHIP_ID on primary or requested address
@@ -43,7 +45,7 @@ bool BMP580::begin(uint8_t addr) {
 
 void BMP580::setI2CSpeed(uint32_t speed) {
   // Can be standard (100000), Fast (400000) or Fast Mode Plus (1000000)
-  Wire.setClock(speed); 
+  _wire->setClock(speed); 
 }
 
 void BMP580::setOversampling(BMP580_OSR osr_p, BMP580_OSR osr_t) {
@@ -125,13 +127,17 @@ void BMP580::updateCache() {
   readBurst(BMP580_TEMP_DATA_XLSB, data, 6);  // Read temp + press simultaneously
 
   // Calculate Temperature
-  long temp_raw = ((long)data[0] | ((long)data[1] << 8) | ((long)data[2] << 16));
-  if (temp_raw & 0x800000) temp_raw |= 0xFF000000;  // Sign extension
+  // Temperature IS signed 24-bit, so this one genuinely needs sign extension.
+  int32_t temp_raw = (int32_t)((uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16));
+  if (temp_raw & 0x800000) temp_raw |= (int32_t)0xFF000000;
   _cachedTemp = temp_raw / 65536.0f;
 
-  // Calculate Pressure
-  long press_raw = ((long)data[3] | ((long)data[4] << 8) | ((long)data[5] << 16));
-  if (press_raw & 0x800000) press_raw |= 0xFF000000;  // Sign extension
+  // Calculate Pressure. Unlike temperature this field is UNSIGNED 24-bit, so it
+  // must NOT be sign-extended: bit 23 sets at 8388608 LSB = 131072 Pa, and the
+  // old sign extension turned readings above ~131 kPa into large negative
+  // pressures. The BMP580 tops out at 125 kPa so it never quite triggered in
+  // normal use, but it left only ~6 kPa of headroom before the output flipped.
+  uint32_t press_raw = ((uint32_t)data[3] | ((uint32_t)data[4] << 8) | ((uint32_t)data[5] << 16));
   _cachedPress = press_raw / 64.0f;
 
   // Save the time of caching
@@ -164,26 +170,26 @@ float BMP580::readAltitude(float seaLevelPressure) {
 // ----------------------
 
 void BMP580::writeRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(_i2cAddr);
-  Wire.write(reg);
-  Wire.write(value);
-  Wire.endTransmission();
+  _wire->beginTransmission(_i2cAddr);
+  _wire->write(reg);
+  _wire->write(value);
+  _wire->endTransmission();
 }
 
 uint8_t BMP580::readRegister(uint8_t reg) {
-  Wire.beginTransmission(_i2cAddr);
-  Wire.write(reg);
-  Wire.endTransmission(false); // Repeated start added for bus stability
-  Wire.requestFrom(_i2cAddr, (uint8_t)1);
-  return Wire.read();
+  _wire->beginTransmission(_i2cAddr);
+  _wire->write(reg);
+  _wire->endTransmission(false); // Repeated start added for bus stability
+  if (_wire->requestFrom(_i2cAddr, (uint8_t)1) != 1) return 0;
+  return _wire->read();
 }
 
 void BMP580::readBurst(uint8_t reg, uint8_t* buffer, uint8_t length) {
-  Wire.beginTransmission(_i2cAddr);
-  Wire.write(reg);
-  Wire.endTransmission(false); // Repeated start
-  Wire.requestFrom(_i2cAddr, length);
+  _wire->beginTransmission(_i2cAddr);
+  _wire->write(reg);
+  _wire->endTransmission(false); // Repeated start
+  _wire->requestFrom(_i2cAddr, length);
   for (uint8_t i = 0; i < length; i++) {
-    buffer[i] = Wire.read();
+    buffer[i] = _wire->available() ? _wire->read() : 0;
   }
 }
