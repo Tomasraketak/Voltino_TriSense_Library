@@ -76,9 +76,18 @@ void loop() {
       Serial.print(" | "); Serial.print(fusion.getActualFusionHz(), 0); Serial.print(" Hz");
 
       // Dropped FIFO packets are unrecoverable lost rotation - surface them.
+      //
+      // Two different numbers, and only the second one is a quantity:
+      //   getFIFOOverflowCount() counts EVENTS - times the FIFO was found full.
+      //   getLostPacketCount()   is the sensor's OWN tally of discarded packets.
+      // A full FIFO that the loop still drains in time loses nothing, so a high
+      // event count next to a lost count of 0 means the data is intact. Compare
+      // the Hz figure above against the ODR for the same answer.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print("  !! FIFO FULL (events ");
         Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(", packets lost ");
+        Serial.print(sensor.imu.getLostPacketCount());
         Serial.print(")");
       }
       Serial.println();

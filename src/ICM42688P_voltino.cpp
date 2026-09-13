@@ -294,29 +294,43 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   if (mode == FIFO_16BIT) {
     // Stream-to-FIFO + ACCEL_EN + GYRO_EN
     // Without ACCEL_EN and GYRO_EN FIFO receives no data!
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03);  
+    // Bit 6 = FIFO_RESUME_PARTIAL_RD. This driver reads the FIFO in bursts and
+    // routinely stops before the buffer is empty, which is exactly the
+    // "interrupted read" the bit governs: left clear, the read pointer rewinds
+    // to the start of the FIFO and the next burst re-reads bytes already
+    // consumed instead of advancing, so the FIFO never actually drains.
+    writeRegister(ICM42688_REG_FIFO_CONFIG1,
+                  ICM42688_BIT_FIFO_RESUME_PARTIAL_RD | 0x03);
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    
   } 
   else if (mode == FIFO_20BIT_HIRES) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
     // HIRES_EN + ACCEL_EN + GYRO_EN (all 3 bits required!)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);
+    writeRegister(ICM42688_REG_FIFO_CONFIG1,
+                  ICM42688_BIT_FIFO_RESUME_PARTIAL_RD | 0x13);
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
 
   if (mode != FIFO_NONE) {
+    // FIFO_COUNT must report BYTES, big-endian, because that is what
+    // availablePackets() and fillFIFOBuffer() decode. Both are the power-on
+    // defaults, but a sketch (or a previous library) may have changed them, and
+    // a count in RECORDS silently reads 16-20x too small: the drain then leaves
+    // most of the FIFO behind on every pass and it fills up regardless of how
+    // fast the loop runs.
+    uint8_t intf = readRegister(ICM42688_REG_INTF_CONFIG0);
+    intf &= (uint8_t)~ICM42688_BIT_FIFO_COUNT_REC;   // 0 = count in bytes
+    intf |= ICM42688_BIT_FIFO_COUNT_ENDIAN;          // 1 = big endian
+    writeRegister(ICM42688_REG_INTF_CONFIG0, intf);
+
     // Enable the FIFO_FULL condition so it latches in INT_STATUS and overflow
     // becomes detectable. Read-modify-write leaves the data-ready routing alone.
     // This also makes the INT1 pin pulse on FIFO full, which is harmless when
     // the pin is unused.
     //
-    // Bit 0, not bit 1: INT_SOURCE0's FIFO_FULL_INT1_EN sits one place below
-    // INT_STATUS's FIFO_FULL_INT. Setting bit 1 here (as this used to) enables
-    // FIFO_THS_INT1_EN - the watermark - whose threshold registers this driver
-    // never programs, so it stands at its power-on value and the condition is
-    // satisfied almost continuously. That is what made the overflow counter run
-    // up by thousands per second on a link that was in fact losing nothing.
+    // Bit 1 in both registers: FIFO_FULL_INT1_EN here lines up with
+    // FIFO_FULL_INT in INT_STATUS. FIFO_THS is bit 2 in both.
     uint8_t intSource = readRegister(ICM42688_REG_INT_SOURCE0);
     writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_INT_SOURCE0_FIFO_FULL);
   }
@@ -334,9 +348,10 @@ uint16_t ICM42688P::availablePackets() {
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
   uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
 
-  // Same sanity check fillFIFOBuffer() applies: a count above the physical FIFO
-  // size means the read was garbled, so trust only what is already buffered.
-  if (fifoBytes > ICM42688_FIFO_BYTES) return buffered;
+  // Same sanity check fillFIFOBuffer() applies: a count beyond what the part can
+  // physically report means the read was garbled, so trust only what is already
+  // buffered. The bound includes the read cache - see ICM42688_FIFO_COUNT_MAX.
+  if (fifoBytes > ICM42688_FIFO_COUNT_MAX) return buffered;
 
   return buffered + (fifoBytes / _fifoPacketSize);
 }
@@ -366,6 +381,13 @@ uint32_t ICM42688P::getFIFOOverflowCount() { return _fifoOverflowCount; }
 void ICM42688P::resetFIFOOverflowCount() {
   _fifoOverflowCount = 0;
   _fifoOverflowFlag = false;
+}
+
+uint32_t ICM42688P::getLostPacketCount() { return _lostPacketTotal; }
+
+void ICM42688P::resetLostPacketCount() {
+  _lostPacketTotal = 0;
+  _lostPacketPrimed = false;   // Re-baseline against the chip's counter
 }
 
 // Bulk read of FIFO_DATA. The FIFO read pointer advances per byte, so on I2C the
@@ -403,8 +425,8 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
   uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
 
-  // A count above the physical FIFO size means a garbled read - discard it.
-  if (fifoBytes > ICM42688_FIFO_BYTES) return 0;
+  // A count beyond what the part can physically report means a garbled read.
+  if (fifoBytes > ICM42688_FIFO_COUNT_MAX) return 0;
 
   // Detector 2: config-free backstop. A count within one packet of the 2 KB
   // capacity means the FIFO is saturated, so samples are being dropped (or are
@@ -415,6 +437,26 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   if (overflow) {
     _fifoOverflowFlag = true;
     if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
+
+    // Both detectors above answer "is the FIFO full", which is not the same
+    // question as "did we lose anything" - a FIFO sitting full loses nothing so
+    // long as the drain keeps pace, and a single stalled loop loses hundreds of
+    // packets while raising one flag. The part keeps the real figure itself, so
+    // read it rather than inferring one. Polled only on an overflow event to
+    // keep two register reads out of the normal path.
+    uint8_t lost[2];
+    readRegisters(ICM42688_REG_FIFO_LOST_PKT0, lost, 2);
+    const uint16_t raw = (uint16_t)lost[0] | ((uint16_t)lost[1] << 8);
+
+    if (!_lostPacketPrimed) {
+      _lostPacketPrimed = true;
+    } else {
+      // Unsigned subtraction, so a wrap of the 16-bit register still yields the
+      // right increment as long as fewer than 65536 packets were lost between
+      // two overflow events.
+      _lostPacketTotal += (uint32_t)(uint16_t)(raw - _lostPacketLastRaw);
+    }
+    _lostPacketLastRaw = raw;
   }
 
   uint16_t packets = fifoBytes / _fifoPacketSize;

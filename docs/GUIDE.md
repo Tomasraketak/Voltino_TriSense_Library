@@ -474,7 +474,20 @@ it. When that happens the sensor discards samples, and discarded samples are
 rotation that can never be integrated — a permanent attitude error, not a
 glitch that washes out.
 
-**First, check whether you are actually losing anything:**
+**First, check whether you are actually losing anything.** Ask the sensor — it
+keeps the tally itself:
+
+```cpp
+Serial.println(sensor.imu.getLostPacketCount());   // packets the CHIP discarded
+```
+
+That is a real quantity, measured in hardware. `getFIFOOverflowCount()` is not:
+it counts *events* — refills that found the FIFO full. One stalled loop is a
+single event but may cost hundreds of packets, while a FIFO that merely sits
+full produces an event per refill and costs nothing. **A high event count next
+to a lost count of zero means your data is intact.**
+
+The independent cross-check needs no extra registers:
 
 ```cpp
 Serial.print(fusion.getActualFusionHz());   // samples integrated per second
@@ -482,11 +495,7 @@ Serial.print(" / ");
 Serial.println(sensor.imu.getODRHz());      // samples produced per second
 ```
 
-If those two match, **no packets are being lost** whatever the overflow counter
-says. Note that `getFIFOOverflowCount()` counts *events* — refills that found
-the FIFO full — not lost samples. One stalled loop is a single event but may
-cost hundreds of packets; a FIFO that merely sits full produces an event per
-refill and costs nothing. The count is a symptom to investigate, not a quantity.
+If those two match, nothing is being lost, whatever the event counter says.
 
 **If the rates genuinely differ,** your loop is not keeping up. Work through
 §4 and §5: measure how long your slowest iteration takes, compare it against the

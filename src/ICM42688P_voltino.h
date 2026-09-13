@@ -33,16 +33,36 @@
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
 
-// FIFO_FULL lives at a DIFFERENT bit position in the two registers - they are
-// not interchangeable, and treating them as one constant silently enabled the
-// wrong interrupt source:
-//   INT_STATUS  (0x2D) bit 1 = FIFO_FULL_INT
-//   INT_SOURCE0 (0x65) bit 0 = FIFO_FULL_INT1_EN   (bit 1 there is FIFO_THS_INT1_EN)
+// FIFO_FULL is bit 1 in BOTH registers, and FIFO_THS is bit 2 in both:
+//   INT_STATUS  (0x2D) bit 1 = FIFO_FULL_INT      (bit 2 = FIFO_THS_INT)
+//   INT_SOURCE0 (0x65) bit 1 = FIFO_FULL_INT1_EN  (bit 2 = FIFO_THS_INT1_EN)
 #define ICM42688_INT_STATUS_FIFO_FULL   0x02
-#define ICM42688_INT_SOURCE0_FIFO_FULL  0x01
+#define ICM42688_INT_SOURCE0_FIFO_FULL  0x02
 
 // Hardware FIFO is 2 KB: 128 x 16-byte packets, or 102 x 20-byte packets.
 #define ICM42688_FIFO_BYTES 2048
+
+// FIFO_COUNT may legitimately exceed the 2 KB array. On top of that memory the
+// part has a read cache two packets wide, so the datasheet puts the reachable
+// total at 2048 bytes (2040 for 20-byte packets) plus one packet, and asks for
+// 2080 bytes of driver allocation because bus timing is non-deterministic.
+// Sanity-checking a count against 2048 therefore rejects counts that are
+// perfectly valid - and a rejected count means zero packets returned, so the
+// drain stalls exactly when the FIFO is at its fullest.
+#define ICM42688_FIFO_COUNT_MAX 2080
+
+// INTF_CONFIG0 (0x4C) - FIFO count format.
+#define ICM42688_REG_INTF_CONFIG0       0x4C
+#define ICM42688_BIT_FIFO_COUNT_REC     0x40  // 1 = count in records, 0 = count in BYTES
+#define ICM42688_BIT_FIFO_COUNT_ENDIAN  0x20  // 1 = big endian (power-on default)
+
+// FIFO_CONFIG1 (0x5F) bit 6. With this clear, a read that does not consume the
+// whole FIFO is not resumable: the next read restarts from the beginning.
+#define ICM42688_BIT_FIFO_RESUME_PARTIAL_RD 0x40
+
+// Hardware counter of packets discarded on overflow in Stream mode (16-bit).
+#define ICM42688_REG_FIFO_LOST_PKT0 0x6C
+#define ICM42688_REG_FIFO_LOST_PKT1 0x6D
 
 enum ICM_BUS {
   BUS_I2C,
@@ -140,6 +160,15 @@ public:
   bool fifoOverflowed();            // True if an overflow occurred since the last call (self-clearing)
   uint32_t getFIFOOverflowCount();  // Total overflow EVENTS since boot / last reset
   void resetFIFOOverflowCount();
+
+  // Packets the SENSOR reports having discarded, read straight from its own
+  // FIFO_LOST_PKT registers. Unlike the event count above, this is an actual
+  // quantity of lost samples measured by the hardware rather than inferred from
+  // how full the FIFO looked, so it is the number to trust when deciding
+  // whether overflow is costing you anything. The chip's counter is 16 bits and
+  // wraps; this accumulates it into 32 across refills.
+  uint32_t getLostPacketCount();
+  void resetLostPacketCount();
 
   // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
@@ -254,6 +283,9 @@ private:
 
   bool _fifoOverflowFlag = false;
   uint32_t _fifoOverflowCount = 0;
+  uint32_t _lostPacketTotal = 0;    // Accumulated across wraps of the 16-bit register
+  uint16_t _lostPacketLastRaw = 0;  // Previous raw reading, to detect the wrap
+  bool _lostPacketPrimed = false;
 
   const uint8_t* nextFIFOPacket();                 // Next usable packet, skipping message packets
   uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
