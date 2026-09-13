@@ -234,6 +234,23 @@ void ICM42688P::enforceBandwidthLimit() {
   }
   _odr = safeODR;
 
+  // Interrupt timing must follow the ODR. The datasheet requires
+  // INT_TPULSE_DURATION and INT_TDEASSERT_DISABLE to be set at 4 kHz and above,
+  // because the defaults - a 100 us pulse plus a mandatory 100 us de-assert
+  // window - are longer than the sample period itself (250 us at 4 kHz, 31 us
+  // at 32 kHz). The interrupt machinery then cannot complete one cycle per
+  // sample, and INT_STATUS is part of that machinery, which this driver reads
+  // on every FIFO refill. The bits are cleared again below 4 kHz so the longer,
+  // easier-to-catch pulse comes back for sketches that wire up INT1.
+  {
+    const uint8_t fastBits = ICM42688_BIT_INT_TPULSE_DURATION
+                           | ICM42688_BIT_INT_TDEASSERT_DISABLE;
+    uint8_t intCfg1 = readRegister(ICM42688_REG_INT_CONFIG1);
+    if (_getHzFromODR(_odr) >= 4000) intCfg1 |= fastBits;
+    else                             intCfg1 &= (uint8_t)~fastBits;
+    writeRegister(ICM42688_REG_INT_CONFIG1, intCfg1);
+  }
+
   uint8_t odd = (uint8_t)_odr;
   uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
   uint8_t aConf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0xF0;

@@ -311,12 +311,21 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
   
-  if (_imu->getFIFOMode() != FIFO_NONE) {
-      float ax, ay, az, gx, gy, gz;
-      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
-  }
+  // Discard whatever the FIFO already holds, so the average below is taken from
+  // samples captured AFTER the user was told to hold still.
+  //
+  // This used to be `while (readFIFO(...));` - drain until it comes up empty.
+  // That loop has no fixed point when the sensor refills faster than the loop
+  // can consume: at a high ODR readFIFO() simply never returns false and the
+  // sketch hangs here forever with no output at all. The hardware has a
+  // single-register flush for exactly this, and it is O(1).
+  _imu->flushFIFO();
 
+  // Bounded: a sensor that stops delivering must not hang the sketch with no
+  // output. autoCalibrateGyro() has had this guard all along; these two had not.
+  const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
   while(count < samples) { 
+    if ((long)(millis() - deadline) >= 0) break;
     float ax, ay, az, gx, gy, gz;
     if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
       remapAxes(ax, ay, az);
@@ -326,6 +335,9 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
       delay(1); 
     }
   }
+
+  if (count == 0) return;          // Nothing measured - leave calibration alone
+  samples = count;                 // Average over what actually arrived
   
   float avgX = (float)(sumX / samples);
   float avgY = (float)(sumY / samples);
@@ -378,12 +390,15 @@ void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
-  if (_imu->getFIFOMode() != FIFO_NONE) {
-      float ax, ay, az, gx, gy, gz;
-      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
-  }
+  // Same as in calibrateAccelStatic(): flush in one register write rather than
+  // looping until the FIFO reads empty, which never happens at a high ODR.
+  _imu->flushFIFO();
 
+  // Bounded, for the same reason as calibrateAccelStatic(): this is the call
+  // that hung a sketch at 32 kHz with nothing printed after "keep still".
+  const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
   while(count < samples) {
+     if ((long)(millis() - deadline) >= 0) break;
      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
      
      bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
@@ -406,6 +421,12 @@ void TriSenseFusion::initOrientation(int samples) {
      }
   }
   
+  // Average over what actually arrived, not over what was asked for: a run cut
+  // short by the deadline would otherwise divide by too large a number and
+  // report a gravity vector shorter than 1 g, tilting the seeded attitude.
+  if (count == 0) return;          // Nothing measured - keep the identity quaternion
+  samples = count;
+
   FUSION_MATH_TYPE r, p, y; 
   getCorrectionAngles(axSum/samples, aySum/samples, azSum/samples, mxSum/samples, mySum/samples, mzSum/samples, r, p, y);
   
@@ -421,10 +442,7 @@ void TriSenseFusion::initOrientation(int samples) {
   q[2] = c1*s2*c3 + s1*c2*s3; 
   q[3] = s1*c2*c3 - c1*s2*s3;
 
-  int nominalHz = _imu->getODRHz();
-  _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   _lastIntegrationTime = micros(); 
-  _sampleCount = 0;
 }
 
 void TriSenseFusion::quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {

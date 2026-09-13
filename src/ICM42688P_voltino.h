@@ -23,6 +23,12 @@
 #define ICM42688_REG_FIFO_CONFIG2  0x60
 #define ICM42688_REG_FIFO_CONFIG3  0x61
 #define ICM42688_REG_INT_SOURCE0   0x65
+// INT_CONFIG1 (0x64). Both of these MUST be set once ODR reaches 4 kHz: the
+// default interrupt pulse is 100 us and the mandatory de-assert window another
+// 100 us, while a 4 kHz sample period is 250 us and a 32 kHz one just 31 us.
+#define ICM42688_REG_INT_CONFIG1   0x64
+#define ICM42688_BIT_INT_TPULSE_DURATION    0x40  // 1 = 8 us pulse (else 100 us)
+#define ICM42688_BIT_INT_TDEASSERT_DISABLE  0x20  // 1 = no 100 us de-assert wait
 #define ICM42688_REG_WHO_AM_I      0x75
 #define ICM42688_REG_BANK_SEL      0x76
 #define ICM42688_REG_PWR_MGMT0     0x4E

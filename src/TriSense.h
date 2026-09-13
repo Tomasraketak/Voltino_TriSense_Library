@@ -75,6 +75,12 @@
   #define DEFAULT_CALIBRATION_SAMPLES 500
 #endif
 
+// Upper bound on any blocking calibration routine. These wait for the sensor to
+// deliver samples, and a sensor that has stopped delivering must not hang the
+// sketch: without a bound the call never returns and nothing is ever printed
+// again, which is indistinguishable from a crash.
+#define CALIBRATION_TIMEOUT_MS 10000UL
+
 // --- ACCELERATION UNITS ---
 enum AccelUnit {
   ACCEL_UNIT_G,      
@@ -233,10 +239,22 @@ public:
   
   unsigned long magCheckIntervalUs = 5000; 
 
-  uint32_t _sampleCount = 0;
-  unsigned long _lastOdrCheckTime = 0;
+  // NOTE: _realDt, _sampleCount and _lastOdrCheckTime used to live here as the
+  // remains of an unfinished "RC oscillator ODR drift tracking" feature. Two
+  // were written once and never read, the third was never touched at all, and
+  // library.properties advertised the feature to the Library Manager. The claim
+  // and the fields are both gone.
+  //
+  // The drift they were meant to cancel is real - the sensor's ODR comes from
+  // an internal RC oscillator, so a nominal 8 kHz may run at 8087 Hz and move
+  // with temperature - but it is already handled: the FIFO path divides the
+  // MCU's measured elapsed time by the packet count, so the dt fed to the
+  // integrator tracks the true rate whatever the oscillator does. Reading the
+  // sensor's own ODR timestamp out of the FIFO (FIFO_TMST_FSYNC_EN plus
+  // TMST_CONFIG) would be better still - it would give true per-packet timing
+  // rather than assuming a batch arrived evenly - but that is a feature to
+  // build deliberately, not a field to leave lying around.
   unsigned long _lastIntegrationTime = 0; 
-  FUSION_MATH_TYPE _realDt = 0.001; 
 
   FUSION_MATH_TYPE invSqrt(FUSION_MATH_TYPE x);
   void clampSampleDt(FUSION_MATH_TYPE& dt, FUSION_MATH_TYPE ideal_dt);

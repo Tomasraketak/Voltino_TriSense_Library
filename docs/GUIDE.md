@@ -185,7 +185,15 @@ usable ODR in practice.
 | 1 kHz | comfortable on any 32-bit MCU | drones, stabilisation, most real work |
 | 2 kHz | 51 ms of slack in HiRes | fast dynamics, needs a tidy loop |
 | 4 kHz | 25 ms of slack | you have measured your loop |
-| 8 kHz+ | 12.8 ms of slack; no room for a blocking `Serial.print` | high-vibration analysis, RP2350 class only |
+| 8 kHz | 12.8 ms of slack; no room for a blocking `Serial.print` | high-vibration analysis, RP2350 class only |
+| 16 kHz+ | 6.4 ms or less; the bus itself is now a factor | benchmarking, not production |
+
+> **32 kHz is not a usable setting over SPI.** At 20 bytes a packet it asks for
+> 5.12 Mbit/s of payload on a 10 MHz link — over half the bus before any
+> per-transaction overhead — and leaves the loop 3.2 ms to service the FIFO.
+> The library will let you select it and it is a perfectly legal ODR, but the
+> MCU cannot keep up and the FIFO stays permanently full. Treat 8 kHz as the
+> practical ceiling for hybrid SPI and 1 kHz for I2C.
 
 `setODR()` may quietly reduce the rate if the *bus* cannot carry it — call
 `getODRHz()` for what is in effect and `getRequestedODRHz()` for what you asked
