@@ -321,19 +321,30 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   // single-register flush for exactly this, and it is O(1).
   _imu->flushFIFO();
 
-  // Bounded: a sensor that stops delivering must not hang the sketch with no
-  // output. autoCalibrateGyro() has had this guard all along; these two had not.
-  const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
-  while(count < samples) { 
-    if ((long)(millis() - deadline) >= 0) break;
-    float ax, ay, az, gx, gy, gz;
-    if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
-      remapAxes(ax, ay, az);
-      sumX += ax; sumY += ay; sumZ += az; 
-      count++;
-    } else {
-      delay(1); 
+  // Bounded, and with a fallback. A sensor that stops delivering must not hang
+  // the sketch with no output, and a rate that cannot be serviced should step
+  // down rather than fail outright - see stepDownODR().
+  for (uint8_t attempt = 0; ; attempt++) {
+    sumX = 0; sumY = 0; sumZ = 0; count = 0;
+    const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
+    bool timedOut = false;
+
+    while(count < samples) { 
+      if ((long)(millis() - deadline) >= 0) { timedOut = true; break; }
+      float ax, ay, az, gx, gy, gz;
+      if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
+        remapAxes(ax, ay, az);
+        sumX += ax; sumY += ay; sumZ += az; 
+        count++;
+      } else {
+        delay(1); 
+      }
     }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!_imu->stepDownODR()) break;   // Already as low as it goes
+    _imu->flushFIFO();
   }
 
   if (count == 0) return;          // Nothing measured - leave calibration alone
@@ -394,31 +405,43 @@ void TriSenseFusion::initOrientation(int samples) {
   // looping until the FIFO reads empty, which never happens at a high ODR.
   _imu->flushFIFO();
 
-  // Bounded, for the same reason as calibrateAccelStatic(): this is the call
-  // that hung a sketch at 32 kHz with nothing printed after "keep still".
-  const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
-  while(count < samples) {
-     if ((long)(millis() - deadline) >= 0) break;
-     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-     
-     bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
-     _mag->readData(); 
+  // Bounded with the same ODR fallback as calibrateAccelStatic(): this is the
+  // call that hung a sketch at 32 kHz with nothing printed after "keep still".
+  for (uint8_t attempt = 0; ; attempt++) {
+    axSum = 0; aySum = 0; azSum = 0;
+    mxSum = 0; mySum = 0; mzSum = 0;
+    count = 0;
+    const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
+    bool timedOut = false;
 
-     if(imuReady) {
-         remapAxes(ax_raw, ay_raw, az_raw);
-         FUSION_MATH_TYPE ax = ax_raw; 
-         FUSION_MATH_TYPE ay = ay_raw; 
-         FUSION_MATH_TYPE az = az_raw; 
-         axSum+=ax; aySum+=ay; azSum+=az;
-         
-         FUSION_MATH_TYPE mx, my, mz;
-         applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+    while(count < samples) {
+       if ((long)(millis() - deadline) >= 0) { timedOut = true; break; }
+       float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+       
+       bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
+       _mag->readData(); 
 
-         mxSum+=mx; mySum+=my; mzSum+=mz;
-         count++; 
-     } else {
-         delay(1); 
-     }
+       if(imuReady) {
+           remapAxes(ax_raw, ay_raw, az_raw);
+           FUSION_MATH_TYPE ax = ax_raw; 
+           FUSION_MATH_TYPE ay = ay_raw; 
+           FUSION_MATH_TYPE az = az_raw; 
+           axSum+=ax; aySum+=ay; azSum+=az;
+           
+           FUSION_MATH_TYPE mx, my, mz;
+           applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+
+           mxSum+=mx; mySum+=my; mzSum+=mz;
+           count++; 
+       } else {
+           delay(1); 
+       }
+    }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!_imu->stepDownODR()) break;   // Already as low as it goes
+    _imu->flushFIFO();
   }
   
   // Average over what actually arrived, not over what was asked for: a run cut

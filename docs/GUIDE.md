@@ -186,14 +186,38 @@ usable ODR in practice.
 | 2 kHz | 51 ms of slack in HiRes | fast dynamics, needs a tidy loop |
 | 4 kHz | 25 ms of slack | you have measured your loop |
 | 8 kHz | 12.8 ms of slack; no room for a blocking `Serial.print` | high-vibration analysis, RP2350 class only |
-| 16 kHz+ | 6.4 ms or less; the bus itself is now a factor | benchmarking, not production |
+| 16 kHz | 6.4 ms of slack; works, but the bus is now a real factor | short high-rate captures |
+| 32 kHz | 3.2 ms of slack; 5.12 Mbit/s of payload on a 10 MHz link | at or past the limit — see below |
 
-> **32 kHz is not a usable setting over SPI.** At 20 bytes a packet it asks for
-> 5.12 Mbit/s of payload on a 10 MHz link — over half the bus before any
-> per-transaction overhead — and leaves the loop 3.2 ms to service the FIFO.
-> The library will let you select it and it is a perfectly legal ODR, but the
-> MCU cannot keep up and the FIFO stays permanently full. Treat 8 kHz as the
-> practical ceiling for hybrid SPI and 1 kHz for I2C.
+### When a rate turns out to be too fast
+
+The top of that table is genuinely marginal, and which side of the line you land
+on depends on your board, your SPI clock and what else your loop does. 16 kHz
+has been seen working on an RP2350 over hybrid SPI at 10 MHz; 32 kHz leaves
+3.2 ms to service a FIFO that is also competing with a magnetometer read.
+
+Nothing is locked out. Every ODR the sensor offers can be selected, and if the
+rate proves unserviceable the library steps down instead of failing:
+
+```
+Voltino TriSense: 32000 Hz could not be serviced - falling back to 16000 Hz.
+```
+
+The blocking calibration routines do this automatically — they time out, drop
+one rung, and retry, up to four times. During normal streaming nothing changes
+the rate behind your back: a rate that silently sags under load is worse than
+one that stays put and tells you. If your own loop detects it is falling behind,
+call it yourself:
+
+```cpp
+if (sensor.imu.getLostPacketCount() > threshold) {
+  sensor.imu.stepDownODR();     // false once 12.5 Hz is reached
+}
+```
+
+As a starting point rather than a limit: **8 kHz** over hybrid SPI and **1 kHz**
+over I2C are comfortable on a 32-bit MCU, with room left for the rest of your
+sketch.
 
 `setODR()` may quietly reduce the rate if the *bus* cannot carry it — call
 `getODRHz()` for what is in effect and `getRequestedODRHz()` for what you asked

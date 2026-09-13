@@ -355,6 +355,33 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   enforceBandwidthLimit();
 }
 
+bool ICM42688P::stepDownODR() {
+  // Descending ladder. The enum is not ordered by frequency - ODR_500HZ is 0xF,
+  // below ODR_12_5HZ's 0xB - so the order has to be spelled out.
+  static const ICM_ODR ladder[] = {
+    ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ,
+    ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ
+  };
+  const uint8_t n = sizeof(ladder) / sizeof(ladder[0]);
+
+  uint8_t cur = n;
+  for (uint8_t i = 0; i < n; i++) {
+    if (ladder[i] == _odr) { cur = i; break; }
+  }
+  if (cur >= n - 1) return false;   // Unknown, or already at the bottom
+
+  const ICM_ODR next = ladder[cur + 1];
+  Serial.print(F("Voltino TriSense: "));
+  Serial.print(_getHzFromODR(_odr));
+  Serial.print(F(" Hz could not be serviced - falling back to "));
+  Serial.print(_getHzFromODR(next));
+  Serial.println(F(" Hz."));
+
+  setODR(next);    // Also becomes the new request, so it will not be raised back
+  flushFIFO();     // Anything still buffered was sampled at the old rate
+  return true;
+}
+
 uint16_t ICM42688P::availablePackets() {
   if (_fifoMode == FIFO_NONE) return 1;
 
@@ -657,19 +684,33 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   unsigned long startT = millis();
   unsigned long lastMicros = micros();
   
-  while(count < samples) {
-    if (millis() - startT > 10000) { 
-      Serial.println(F("Error: Sensor read timeout during calibration."));
-      break;
-    }
-    
-    if (micros() - lastMicros >= 1000) {
-      lastMicros = micros();
-      if(readIMU(ax, ay, az, gx, gy, gz)) {
-        gxSum += gx; gySum += gy; gzSum += gz;
-        count++;
+  // On a timeout, drop to the next ODR down and try again rather than returning
+  // an offset averaged from a handful of samples - or none at all.
+  for (uint8_t attempt = 0; ; attempt++) {
+    gxSum = 0; gySum = 0; gzSum = 0; count = 0;
+    startT = millis();
+    lastMicros = micros();
+    bool timedOut = false;
+
+    while(count < samples) {
+      if (millis() - startT > CALIBRATION_TIMEOUT_MS) { 
+        Serial.println(F("Error: Sensor read timeout during calibration."));
+        timedOut = true;
+        break;
+      }
+      
+      if (micros() - lastMicros >= 1000) {
+        lastMicros = micros();
+        if(readIMU(ax, ay, az, gx, gy, gz)) {
+          gxSum += gx; gySum += gy; gzSum += gz;
+          count++;
+        }
       }
     }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!stepDownODR()) break;   // Already as low as it goes
   }
   
   if (count > 0) {

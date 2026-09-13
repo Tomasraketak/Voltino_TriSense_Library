@@ -70,6 +70,18 @@
 #define ICM42688_REG_FIFO_LOST_PKT0 0x6C
 #define ICM42688_REG_FIFO_LOST_PKT1 0x6D
 
+// Upper bound on any blocking calibration routine. These wait for the sensor to
+// deliver samples, and a sensor that has stopped delivering must not hang the
+// sketch: without a bound the call never returns and nothing is ever printed
+// again, which is indistinguishable from a crash.
+#define CALIBRATION_TIMEOUT_MS 10000UL
+
+// How many times a blocking calibration may drop to the next ODR down and try
+// again before giving up. Collecting a thousand samples takes well under a
+// second at any rate the sensor offers, so hitting the timeout at all means the
+// configured rate cannot be serviced - a lower one usually can.
+#define CALIBRATION_ODR_FALLBACK_ATTEMPTS 4
+
 enum ICM_BUS {
   BUS_I2C,
   BUS_SPI
@@ -135,6 +147,21 @@ public:
   
   int getODRHz();               // ODR actually in effect (may be below what you asked for)
   int getRequestedODRHz();      // ODR you asked for via setODR()
+
+  // Drops to the next ODR down the ladder and makes that the new request, so
+  // the bandwidth limiter will not raise it again. Returns false if already at
+  // the bottom (12.5 Hz), leaving the rate untouched.
+  //
+  // This is the recovery path for a rate the system turns out not to be able to
+  // service. Nothing calls it automatically during normal streaming - a rate
+  // that silently sags under load is worse than one that stays put and tells
+  // you - but the blocking calibration routines use it when they time out, and
+  // a sketch that detects it is falling behind can call it directly.
+  //
+  // ODR is one of the few registers the datasheet allows to be changed while
+  // the sensor is running, so no power-down cycle is needed. The FIFO is
+  // flushed, because packets already in it were captured at the old rate.
+  bool stepDownODR();
   
   // [VOLTINO FIX] Helper method to dynamically adapt fusion integration based on buffer state
   ICM_FIFO_MODE getFIFOMode(); 

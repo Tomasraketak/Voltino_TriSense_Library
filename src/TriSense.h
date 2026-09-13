@@ -75,12 +75,6 @@
   #define DEFAULT_CALIBRATION_SAMPLES 500
 #endif
 
-// Upper bound on any blocking calibration routine. These wait for the sensor to
-// deliver samples, and a sensor that has stopped delivering must not hang the
-// sketch: without a bound the call never returns and nothing is ever printed
-// again, which is indistinguishable from a crash.
-#define CALIBRATION_TIMEOUT_MS 10000UL
-
 // --- ACCELERATION UNITS ---
 enum AccelUnit {
   ACCEL_UNIT_G,      
