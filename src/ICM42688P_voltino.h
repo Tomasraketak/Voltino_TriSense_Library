@@ -33,8 +33,13 @@
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
 
-// Bit 1 in both INT_STATUS (FIFO_FULL_INT) and INT_SOURCE0 (FIFO_FULL_INT1_EN).
-#define ICM42688_BIT_FIFO_FULL 0x02
+// FIFO_FULL lives at a DIFFERENT bit position in the two registers - they are
+// not interchangeable, and treating them as one constant silently enabled the
+// wrong interrupt source:
+//   INT_STATUS  (0x2D) bit 1 = FIFO_FULL_INT
+//   INT_SOURCE0 (0x65) bit 0 = FIFO_FULL_INT1_EN   (bit 1 there is FIFO_THS_INT1_EN)
+#define ICM42688_INT_STATUS_FIFO_FULL   0x02
+#define ICM42688_INT_SOURCE0_FIFO_FULL  0x01
 
 // Hardware FIFO is 2 KB: 128 x 16-byte packets, or 102 x 20-byte packets.
 #define ICM42688_FIFO_BYTES 2048
@@ -127,8 +132,13 @@ public:
   // Note: this reads INT_STATUS once per FIFO refill, and that register is
   // read-to-clear - so if your sketch also drives the INT pins and inspects
   // INT_STATUS itself, expect the driver to have consumed the flags first.
+  // NOTE ON THE COUNT: this counts EVENTS - refills that found the FIFO full -
+  // not lost samples. One stalled loop produces one event but may lose hundreds
+  // of packets; a FIFO that merely sits full produces an event per refill while
+  // losing nothing. To judge actual data loss, compare getActualFusionHz()
+  // against getODRHz(): if they match, nothing is being lost.
   bool fifoOverflowed();            // True if an overflow occurred since the last call (self-clearing)
-  uint32_t getFIFOOverflowCount();  // Total overflow events since boot / last reset
+  uint32_t getFIFOOverflowCount();  // Total overflow EVENTS since boot / last reset
   void resetFIFOOverflowCount();
 
   // --- Data reading ---
@@ -221,10 +231,21 @@ private:
   // FIFO_DATA read serve up to FIFO_BURST_PACKETS packets, instead of two bus
   // transactions per single packet.
   static const uint8_t FIFO_MAX_PACKET_SIZE = 20;
-#if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
-  static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B buffer
+  // Sizing this BELOW the hardware FIFO's capacity (102 x 20-byte packets) means
+  // a full FIFO needs several round trips to empty, each paying its own
+  // INT_STATUS + FIFO_COUNT reads - extra latency at exactly the moment the
+  // driver is already behind. Where the RAM exists, one burst therefore covers
+  // the whole FIFO. Override with -DTRISENSE_FIFO_BURST_PACKETS=n.
+#if defined(TRISENSE_FIFO_BURST_PACKETS)
+  static const uint8_t FIFO_BURST_PACKETS = TRISENSE_FIFO_BURST_PACKETS;
+#elif defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+  static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B - an Uno has 2 KB total
+#elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350) || defined(ESP32) \
+   || defined(ARDUINO_ARCH_SAMD51) || defined(__IMXRT1062__)
+  static const uint8_t FIFO_BURST_PACKETS = 128;  // 2560 B - drains a full FIFO in one go
+                                                  // (2048/16 = 128 packets, 2048/20 = 102)
 #else
-  static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B buffer
+  static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B - conservative default
 #endif
   uint8_t _fifoBuf[FIFO_BURST_PACKETS * FIFO_MAX_PACKET_SIZE];
   uint8_t _fifoBufCount = 0;   // Packets currently held in _fifoBuf
@@ -234,6 +255,7 @@ private:
   bool _fifoOverflowFlag = false;
   uint32_t _fifoOverflowCount = 0;
 
+  const uint8_t* nextFIFOPacket();                 // Next usable packet, skipping message packets
   uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
   void readFIFOBytes(uint8_t *buf, size_t len);    // Bulk FIFO_DATA read (chunked on I2C)
   void invalidateFIFOBuffer();

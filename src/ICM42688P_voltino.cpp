@@ -310,8 +310,15 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
     // becomes detectable. Read-modify-write leaves the data-ready routing alone.
     // This also makes the INT1 pin pulse on FIFO full, which is harmless when
     // the pin is unused.
+    //
+    // Bit 0, not bit 1: INT_SOURCE0's FIFO_FULL_INT1_EN sits one place below
+    // INT_STATUS's FIFO_FULL_INT. Setting bit 1 here (as this used to) enables
+    // FIFO_THS_INT1_EN - the watermark - whose threshold registers this driver
+    // never programs, so it stands at its power-on value and the condition is
+    // satisfied almost continuously. That is what made the overflow counter run
+    // up by thousands per second on a link that was in fact losing nothing.
     uint8_t intSource = readRegister(ICM42688_REG_INT_SOURCE0);
-    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_BIT_FIFO_FULL);
+    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_INT_SOURCE0_FIFO_FULL);
   }
 
   enforceBandwidthLimit();
@@ -390,7 +397,7 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   // This only reports anything because setFIFOMode() enables FIFO_FULL in
   // INT_SOURCE0 - the status bit does not latch for a disabled source.
   uint8_t intStatus = readRegister(ICM42688_REG_INT_STATUS);
-  if (intStatus & ICM42688_BIT_FIFO_FULL) overflow = true;
+  if (intStatus & ICM42688_INT_STATUS_FIFO_FULL) overflow = true;
 
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
@@ -485,20 +492,33 @@ bool ICM42688P::readSensorData(float& ax, float& ay, float& az, float& gx, float
   return true;
 }
 
+// Hands back the next usable packet in the burst buffer, refilling from the
+// hardware when it runs dry, and returns nullptr when nothing is available.
+//
+// Header bit 7 marks an empty/message packet. Such a packet still occupies a
+// full packet slot, so the ones behind it are perfectly good and stay aligned -
+// it is skipped rather than treated as a fault. The previous code dropped the
+// ENTIRE burst on the first one and made the caller abort its drain, which at a
+// high ODR meant throwing away up to a hundred valid samples and then meeting
+// the same packet again on the next pass: once one appeared, the driver could
+// fall permanently behind the sensor.
+const uint8_t* ICM42688P::nextFIFOPacket() {
+  // Bounded so a FIFO returning nothing but 0xFF (read past the end, or a
+  // sensor that has stopped streaming) cannot spin here forever.
+  for (uint16_t guard = 0; guard < 2 * (uint16_t)FIFO_BURST_PACKETS + 4; guard++) {
+    if (_fifoBufIndex >= _fifoBufCount) {
+      if (fillFIFOBuffer() == 0) return nullptr;
+    }
+    const uint8_t* packet = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
+    _fifoBufIndex++;
+    if ((packet[0] & 0x80) == 0) return packet;
+  }
+  return nullptr;
+}
+
 bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  if (_fifoBufIndex >= _fifoBufCount) {
-    if (fillFIFOBuffer() == 0) return false;
-  }
-
-  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
-  _fifoBufIndex++;
-
-  // Header bit 7 set marks an empty/message packet: the rest of the burst is
-  // not trustworthy, so drop it and resynchronise on the next call.
-  if ((buffer[0] & 0x80) != 0) {
-    invalidateFIFOBuffer();
-    return false;
-  }
+  const uint8_t* buffer = nextFIFOPacket();
+  if (buffer == nullptr) return false;
 
   int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
   int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
@@ -520,17 +540,8 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
 // [VOLTINO FIX] PERFEKTNÍ 20-BIT PARSOVÁNÍ PODLE TDK DATASHEETU
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  if (_fifoBufIndex >= _fifoBufCount) {
-    if (fillFIFOBuffer() == 0) return false;
-  }
-
-  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
-  _fifoBufIndex++;
-
-  if ((buffer[0] & 0x80) != 0) {
-    invalidateFIFOBuffer();
-    return false;
-  }
+  const uint8_t* buffer = nextFIFOPacket();
+  if (buffer == nullptr) return false;
 
   // Extrakce 20-bit hodnot podle TDK Packet 4 (Byte 17, 18, 19 sdílejí bity)
   // Byte 17 (0x11): Bity 7:4 = Gyro X [3:0], Bity 3:0 = Accel X [3:0]

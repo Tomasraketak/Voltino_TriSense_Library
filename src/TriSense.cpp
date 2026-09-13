@@ -335,13 +335,13 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   // residual is worked out here, exactly as before: the up axis should read
   // 1 g and every other axis 0 g.
   float dx, dy, dz;
-  if (abs(avgZ) > 0.7f) {
+  if (fabs(avgZ) > 0.7f) {
     dx = avgX; dy = avgY;
     dz = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
-  } else if (abs(avgX) > 0.7f) {
+  } else if (fabs(avgX) > 0.7f) {
     dx = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
     dy = avgY; dz = avgZ;
-  } else if (abs(avgY) > 0.7f) {
+  } else if (fabs(avgY) > 0.7f) {
     dx = avgX;
     dy = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
     dz = avgZ;
@@ -432,8 +432,12 @@ void TriSenseFusion::quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE&
   FUSION_MATH_TYPE cosr_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]); 
   roll = atan2(sinr_cosp, cosr_cosp);
   
+  // fabs(), not abs(): Arduino.h defines abs() as a macro, but when <stdlib.h>'s
+  // integer abs(int) wins the lookup instead - which happens on some cores and
+  // in any translation unit that includes <cstdlib> after Arduino.h - the
+  // argument is truncated to an int and every value below 1.0 becomes 0.
   FUSION_MATH_TYPE sinp = 2.0 * (q[0] * q[2] - q[3] * q[1]); 
-  if (abs(sinp) >= 1.0) pitch = copysign((FUSION_MATH_TYPE)PI / 2.0, sinp); else pitch = asin(sinp);
+  if (fabs(sinp) >= 1.0) pitch = copysign((FUSION_MATH_TYPE)PI / 2.0, sinp); else pitch = asin(sinp);
   
   FUSION_MATH_TYPE siny_cosp = 2.0 * (q[0] * q[3] + q[1] * q[2]); 
   FUSION_MATH_TYPE cosy_cosp = 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]); 
@@ -457,6 +461,14 @@ float TriSenseFusion::getMagHeadingDegrees() {
   return AK09918C::computeHeading((float)lastMx, (float)lastMy, (float)lastMz, roll, pitch, magneticDeclination);
 }
 
+// Reference roll/pitch/yaw straight from the accelerometer and magnetometer.
+//
+// These are Euler angles and therefore degenerate at pitch = +/-90 degrees,
+// where roll and yaw stop being separable. Callers must weight the yaw this
+// returns by how far the board is from that attitude - complementaryCorrection()
+// does so with both an estimate-based and a measurement-based gain. The roll and
+// pitch corrections do not come through here at all: they use the accelerometer
+// cross product in complementaryCorrection(), which has no such singularity.
 void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
                                          FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                          FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {
@@ -651,8 +663,25 @@ AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFu
 void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
                                                 FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                                 FUSION_MATH_TYPE correction_dt) {
-  FUSION_MATH_TYPE totalAccelG = sqrt(ax * ax + ay * ay + az * az); 
-  FUSION_MATH_TYPE recipNorm = invSqrt(ax * ax + ay * ay + az * az); 
+  // Keep the raw vector: the tilt-compensated heading below needs the real
+  // magnitudes, and re-multiplying the normalised copy by totalAccelG just to
+  // recover them costs three multiplies and loses a little precision.
+  const FUSION_MATH_TYPE rawAx = ax, rawAy = ay, rawAz = az;
+
+  FUSION_MATH_TYPE accelSq = ax * ax + ay * ay + az * az;
+
+  // An all-zero accelerometer vector means the sensor gave us nothing (bus
+  // fault, sensor asleep) - never a real reading, since gravity alone is 1 g in
+  // free fall only. Normalising it divides by zero: invSqrt(0) is +inf on the
+  // hardware-FPU path, so ax/ay/az become inf, ex/ey become NaN, and the NaN
+  // lands in the quaternion, where it is permanent - every later normalisation
+  // reproduces it and the attitude output never recovers. Skipping the
+  // correction leaves the gyro integration to carry on alone, which is exactly
+  // the right behaviour for one missing accelerometer sample.
+  if (!(accelSq > (FUSION_MATH_TYPE)1e-12)) return;   // also catches NaN
+
+  FUSION_MATH_TYPE recipNorm = invSqrt(accelSq);
+  FUSION_MATH_TYPE totalAccelG = accelSq * recipNorm;   // sqrt(s) == s / sqrt(s)
   ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
   
   FUSION_MATH_TYPE magStrength = sqrt(mx * mx + my * my + mz * mz);
@@ -674,9 +703,36 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   
   FUSION_MATH_TYPE tilt_gain = exp(-tilt_deg_sq / (2.0 * (FUSION_MATH_TYPE)magTiltSigmaDeg * (FUSION_MATH_TYPE)magTiltSigmaDeg));
   final_mag_gain *= tilt_gain;
+
+  // --- Gimbal-lock guard on the magnetometer heading ---
+  //
+  // The quaternion integration itself cannot gimbal-lock; that is the whole
+  // point of using one. The tilt-compensated heading below can, because it goes
+  // through Euler angles: roll = atan2(ay, az) is indeterminate when ay and az
+  // both vanish, i.e. when the board points straight up or straight down. There
+  // the measured roll is pure noise, and it feeds sin(phi)/cos(phi) in the
+  // heading projection, so yaw_corr becomes meaningless rather than merely
+  // imprecise.
+  //
+  // tilt_gain above is close to zero in that attitude and mostly hides this,
+  // but it is derived from the ESTIMATED gravity direction, not the measured
+  // one - so it stays open when the estimate is wrong, which is exactly when a
+  // correction is most likely to be applied and most likely to be wrong. It is
+  // also user-tunable: magTiltSigmaDeg = 60 still lets ~40% of a garbage
+  // heading through at 90 degrees of tilt.
+  //
+  // So gate on the measurement as well. cos(pitch) = sqrt(ay^2 + az^2) for a
+  // unit gravity vector; it is 1 when level and 0 at the singularity. Ramping
+  // instead of cutting keeps the filter continuous - a step in the gain would
+  // show up as a visible jump in the fused yaw.
+  {
+    const FUSION_MATH_TYPE cos_pitch = sqrt(ay * ay + az * az);
+    const FUSION_MATH_TYPE ramp_from = (FUSION_MATH_TYPE)0.17365;  // cos(80 deg)
+    if (cos_pitch < ramp_from) final_mag_gain *= (cos_pitch / ramp_from);
+  }
   
   FUSION_MATH_TYPE roll_corr, pitch_corr, yaw_corr; 
-  getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
+  getCorrectionAngles(rawAx, rawAy, rawAz, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
   
   FUSION_MATH_TYPE siny_cosp = 2.0 * (q[0] * q[3] + q[1] * q[2]); 
   FUSION_MATH_TYPE cosy_cosp = 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]); 
