@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <string.h>   // memcpy - used by invSqrt() to reinterpret bits without UB
 #include "BMP580.h"
 
 // ---------------------------------------------------------
@@ -24,6 +25,25 @@
 // ---------------------------------------------------------
 
 #include "ICM42688P_voltino.h"
+
+// ---------------------------------------------------------
+// HARDWARE FPU DETECTION
+// ---------------------------------------------------------
+// Decides how invSqrt() is implemented. Where the MCU can do sqrt in hardware
+// a single VSQRT+VDIV is both faster and exact, so the classic bit-trick is
+// strictly worse there; it is kept only for FPU-less cores.
+//
+//   __ARM_FP        - set by GCC for any ARM core with an FPU. Covers RP2350
+//                     (Cortex-M33), SAMD51, STM32F4/F7/H7, nRF52840, Teensy.
+//                     NOT set for RP2040 (Cortex-M0+), which is correct.
+//   __riscv_flen    - set for RISC-V cores that have the F/D extension.
+//   ESP32 (Xtensa)  - classic ESP32 and ESP32-S3 have an FPU; the S2 does not,
+//                     and the C-series are RISC-V and handled by the line above.
+#if defined(__ARM_FP) \
+ || (defined(__riscv) && defined(__riscv_flen)) \
+ || (defined(ESP32) && !defined(__riscv) && !defined(CONFIG_IDF_TARGET_ESP32S2))
+  #define TRISENSE_HAS_HW_FPU 1
+#endif
 
 // ---------------------------------------------------------
 // DYNAMIC ARCHITECTURE DETECTION & OPTIMIZATION
@@ -69,11 +89,30 @@ enum TriSenseOrientation {
   ORIENTATION_Y_UP        // Vertical (Y points up/forward)
 };
 
+// A snapshot is ALWAYS fully populated with the most recent valid reading of
+// every quantity - the three sensors run at different rates (IMU up to 8 kHz,
+// magnetometer 100 Hz, barometer 240 Hz), so on any given call some of them
+// simply have nothing new to give. Rather than reporting failure for that
+// perfectly normal case, TriSense keeps the last good value of each block and
+// refreshes only what the hardware actually delivered.
+//
+// The *Fresh flags say what was refreshed by THIS call; the *AgeUs fields say
+// how old each block is, so a sketch that cares (e.g. dead reckoning) can tell
+// a 200 us old accelerometer sample from a 3 s old one left over after the
+// magnetometer was unplugged.
 struct TriSenseDataSnapshot {
   float accelX; float accelY; float accelZ;
   float gyroX; float gyroY; float gyroZ;
   float magX; float magY; float magZ;
   float pressure; float temperature;
+
+  bool imuFresh;       // IMU block was updated by this getSnapshot() call
+  bool magFresh;       // Magnetometer block was updated by this call
+  bool baroFresh;      // Barometer block was updated by this call
+
+  uint32_t imuAgeUs;   // Microseconds since the IMU block was last refreshed
+  uint32_t magAgeUs;   // Microseconds since the magnetometer was last refreshed
+  uint32_t baroAgeUs;  // Microseconds since the barometer was last refreshed
 };
 
 enum TriSenseMode {
@@ -89,16 +128,31 @@ public:
 
   TriSense();
   
-  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000);
+  // All three sensors share one I2C bus (the ICM-42688-P leaves it only when
+  // put on SPI in MODE_HYBRID), so the bus is selected once here and handed to
+  // every driver. Pass Wire1 etc. on boards whose TriSense module is not on the
+  // primary bus. On cores that support pin remapping, call wire.setSDA()/setSCL()
+  // (or wire.setPins() on ESP32) BEFORE this - beginAll() calls wire.begin()
+  // without pin arguments and therefore keeps whatever mapping you configured.
+  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire);
   
-  bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR);
-  bool beginMAG();
-  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000);
+  bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);
+  bool beginMAG(TwoWire &wire = Wire);
+  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000, TwoWire &wire = Wire);
+
+  // The I2C bus every sensor on the module is attached to.
+  TwoWire& getWire() { return *_wire; }
 
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = DEFAULT_CALIBRATION_SAMPLES);
   void autoCalibrateAccel(); 
 
+  // Fills `data` with the newest reading of every quantity, refreshing whatever
+  // the sensors have ready and reusing the last known good value for the rest.
+  // Returns true once every block has produced at least one valid reading, i.e.
+  // once the snapshot is fully meaningful. It does NOT return false merely
+  // because a sensor had no new sample this time round - check imuFresh /
+  // magFresh / baroFresh (or the *AgeUs fields) for that.
   bool getSnapshot(TriSenseDataSnapshot &data);
   float readPressure();
   float readTemperature();
@@ -107,12 +161,23 @@ public:
 
 private:
   TriSenseMode _mode;
+  TwoWire* _wire = &Wire;
+
+  // Last known good reading of each block, plus when it was taken.
+  TriSenseDataSnapshot _last;
+  bool _haveIMU = false;
+  bool _haveMag = false;
+  bool _haveBaro = false;
+  uint32_t _lastImuUs = 0;
+  uint32_t _lastMagUs = 0;
+  uint32_t _lastBaroUs = 0;
 };
 
 class TriSenseFusion {
 protected:
   TriSenseOrientation _mountOrientation = ORIENTATION_Z_UP;
   void remapAxes(float& x, float& y, float& z);
+  void unremapAxes(float& x, float& y, float& z);
 
   // Applies hard-iron then soft-iron in the magnetometer's OWN axes, and only
   // then remaps into the mount frame. The order is not interchangeable: a
@@ -136,8 +201,14 @@ public:
   FUSION_MATH_TYPE lastGx = 0, lastGy = 0, lastGz = 0;
   FUSION_MATH_TYPE lastMx = 0, lastMy = 0, lastMz = 0;
   
-  float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
-  float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
+  // NOTE: the fusion layer no longer stores an accel/gyro bias of its own. It
+  // used to, applied AFTER remapAxes() (i.e. in the mount frame) while the
+  // driver applied its own in the sensor's axes - so populating both subtracted
+  // the bias twice, and a value read from a driver getter landed on the wrong
+  // axis for every orientation but ORIENTATION_Z_UP. Calibration now lives in
+  // one place only: ICM42688P's accOffset / accScale / gyrOffset, all in SENSOR
+  // axes, applied before the mount remap. Use setGyroOffsets() (forwards to the
+  // driver) or the driver's own setters, and read back with its getters.
   
   // Dynamic Gyro Bias (In-flight drift correction). Units: dps, matching lastGx/y/z.
   FUSION_MATH_TYPE gyroBias[3] = {0.0, 0.0, 0.0};
@@ -162,12 +233,25 @@ public:
   
   unsigned long magCheckIntervalUs = 5000; 
 
-  uint32_t _sampleCount = 0;
-  unsigned long _lastOdrCheckTime = 0;
+  // NOTE: _realDt, _sampleCount and _lastOdrCheckTime used to live here as the
+  // remains of an unfinished "RC oscillator ODR drift tracking" feature. Two
+  // were written once and never read, the third was never touched at all, and
+  // library.properties advertised the feature to the Library Manager. The claim
+  // and the fields are both gone.
+  //
+  // The drift they were meant to cancel is real - the sensor's ODR comes from
+  // an internal RC oscillator, so a nominal 8 kHz may run at 8087 Hz and move
+  // with temperature - but it is already handled: the FIFO path divides the
+  // MCU's measured elapsed time by the packet count, so the dt fed to the
+  // integrator tracks the true rate whatever the oscillator does. Reading the
+  // sensor's own ODR timestamp out of the FIFO (FIFO_TMST_FSYNC_EN plus
+  // TMST_CONFIG) would be better still - it would give true per-packet timing
+  // rather than assuming a batch arrived evenly - but that is a feature to
+  // build deliberately, not a field to leave lying around.
   unsigned long _lastIntegrationTime = 0; 
-  FUSION_MATH_TYPE _realDt = 0.001; 
 
   FUSION_MATH_TYPE invSqrt(FUSION_MATH_TYPE x);
+  void clampSampleDt(FUSION_MATH_TYPE& dt, FUSION_MATH_TYPE ideal_dt);
   FUSION_MATH_TYPE gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma);
   void gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt);
   void getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
@@ -182,6 +266,12 @@ public:
   void setMountOrientation(TriSenseOrientation orientation);
   float getActualFusionHz(); 
   
+  // One-point gravity calibration: hold the board still, any face up. Refines
+  // the driver's accelerometer offset (in sensor axes) - it does NOT touch the
+  // scale factors, so it is the quick alternative to the 6-point
+  // ICM42688P::autoCalibrateAccel(), not a replacement for it. Both write the
+  // same storage, so the later call refines the earlier one instead of
+  // silently stacking on top of it.
   void calibrateAccelStatic(int samples = DEFAULT_CALIBRATION_SAMPLES);
   void initOrientation(int samples = DEFAULT_CALIBRATION_SAMPLES);
   
@@ -201,6 +291,10 @@ public:
   void setMagTiltSigma(float sigmaDeg);                         
   void setMagCalibration(float hardIron[3], float softIron[3][3]);
   void setDeclination(float deg);
+  // Gyro bias in the SENSOR's own axes (dps), stored in the driver. Matches
+  // what ICM42688P::autoCalibrateGyro() computes and getGyroOffset() reports,
+  // so a value saved to EEPROM can be restored through either, at any mount
+  // orientation.
   void setGyroOffsets(float x, float y, float z);
   void setMagHardIron(float x, float y, float z);
   void setMagSoftIron(float matrix[3][3]);

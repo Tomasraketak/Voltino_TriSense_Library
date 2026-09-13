@@ -44,8 +44,8 @@
   #define TRISENSE_MOSI  3   // SPI0 TX
   #define TRISENSE_MISO  4   // SPI0 RX
   #define TRISENSE_CS    5   // ICM-42688-P chip select
-  #define TRISENSE_SDA   6   // I2C SDA (AK09918C + BMP580)
-  #define TRISENSE_SCL   7   // I2C SCL (AK09918C + BMP580)
+  #define TRISENSE_SDA   16  // I2C SDA (AK09918C + BMP580)
+  #define TRISENSE_SCL   17  // I2C SCL (AK09918C + BMP580)
 #elif defined(ESP32)
   #define TRISENSE_SCK   18
   #define TRISENSE_MOSI  23

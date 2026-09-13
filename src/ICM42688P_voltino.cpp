@@ -4,6 +4,8 @@ ICM42688P::ICM42688P() {
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
   _i2cAddr = ICM_ADDR_PRIMARY;
+  _requestedOdr = ODR_1KHZ;
+  _odr = ODR_1KHZ;
   _fifoMode = FIFO_NONE;
   _fifoPacketSize = 16;
   _debug = false;
@@ -11,6 +13,8 @@ ICM42688P::ICM42688P() {
 }
 
 void ICM42688P::setDebug(bool enable) { _debug = enable; }
+
+void ICM42688P::setWire(TwoWire &wire) { _wire = &wire; }
 
 bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
   return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
@@ -63,20 +67,20 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   } else {
     #if defined(ESP32) 
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setPins(misoSdaPin, sckSclPin);
+        _wire->setPins(misoSdaPin, sckSclPin);
       }
     #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setSDA(misoSdaPin);
-        Wire.setSCL(sckSclPin);
+        _wire->setSDA(misoSdaPin);
+        _wire->setSCL(sckSclPin);
       }
     #endif
     
-    Wire.begin();
-    Wire.setClock(_spiFreq);
+    _wire->begin();
+    _wire->setClock(_spiFreq);
 
-    Wire.beginTransmission(_i2cAddr);
-    if (Wire.endTransmission() != 0) {
+    _wire->beginTransmission(_i2cAddr);
+    if (_wire->endTransmission() != 0) {
       _i2cAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
     }
   }
@@ -114,11 +118,11 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(startReg);
-    Wire.endTransmission(false);
-    Wire.requestFrom((int)_i2cAddr, (int)len);
-    for(size_t i=0; i<len; i++) buffer[i] = (Wire.available()) ? Wire.read() : 0;
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(startReg);
+    _wire->endTransmission(false);
+    _wire->requestFrom((int)_i2cAddr, (int)len);
+    for(size_t i=0; i<len; i++) buffer[i] = (_wire->available()) ? _wire->read() : 0;
   }
 }
 
@@ -131,10 +135,10 @@ void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg); 
-    Wire.write(data);
-    Wire.endTransmission();
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(reg); 
+    _wire->write(data);
+    _wire->endTransmission();
   }
 }
 
@@ -148,17 +152,21 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
     if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
-    Wire.beginTransmission(_i2cAddr);
-    Wire.write(reg); 
-    Wire.endTransmission(false);
-    Wire.requestFrom((int)_i2cAddr, 1);
-    if (Wire.available()) data = Wire.read();
+    _wire->beginTransmission(_i2cAddr);
+    _wire->write(reg); 
+    _wire->endTransmission(false);
+    _wire->requestFrom((int)_i2cAddr, 1);
+    if (_wire->available()) data = _wire->read();
   }
   return data;
 }
 
 int ICM42688P::getODRHz() {
   return _getHzFromODR(_odr);
+}
+
+int ICM42688P::getRequestedODRHz() {
+  return _getHzFromODR(_requestedOdr);
 }
 
 // [VOLTINO FIX] FIFO Helper Method
@@ -195,9 +203,13 @@ void ICM42688P::enforceBandwidthLimit() {
   uint32_t bitsPerRead = bytesPerRead * bitsPerByte;
   uint32_t maxAllowedBps = (uint32_t)(_spiFreq * 0.8f);
 
+  // Always re-derive from the REQUESTED rate, never from whatever _odr was last
+  // clamped to. Otherwise a downgrade is permanent: switching to a cheaper FIFO
+  // mode later frees bandwidth, but the original request has been forgotten and
+  // the sensor stays stuck at the reduced rate.
   ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
-  ICM_ODR safeODR = _odr;
-  int requestedHz = _getHzFromODR(_odr); 
+  ICM_ODR safeODR = _requestedOdr;
+  int requestedHz = _getHzFromODR(_requestedOdr);
 
   for (int i = 0; i < 12; i++) {
     int targetHz = _getHzFromODR(odrList[i]);
@@ -210,13 +222,33 @@ void ICM42688P::enforceBandwidthLimit() {
     }
   }
 
-  if (safeODR != _odr) {
-    if (_debug) {
-      Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded. Downgrading ODR to "));
-      Serial.print(_getHzFromODR(safeODR));
-      Serial.println(F(" Hz."));
-    }
-    _odr = safeODR; 
+  if (_debug && safeODR != _requestedOdr) {
+    Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded. Downgrading ODR to "));
+    Serial.print(_getHzFromODR(safeODR));
+    Serial.println(F(" Hz."));
+  }
+  if (_debug && safeODR != _odr && safeODR == _requestedOdr) {
+    Serial.print(F("Voltino TriSense: bandwidth freed, restoring requested ODR of "));
+    Serial.print(_getHzFromODR(safeODR));
+    Serial.println(F(" Hz."));
+  }
+  _odr = safeODR;
+
+  // Interrupt timing must follow the ODR. The datasheet requires
+  // INT_TPULSE_DURATION and INT_TDEASSERT_DISABLE to be set at 4 kHz and above,
+  // because the defaults - a 100 us pulse plus a mandatory 100 us de-assert
+  // window - are longer than the sample period itself (250 us at 4 kHz, 31 us
+  // at 32 kHz). The interrupt machinery then cannot complete one cycle per
+  // sample, and INT_STATUS is part of that machinery, which this driver reads
+  // on every FIFO refill. The bits are cleared again below 4 kHz so the longer,
+  // easier-to-catch pulse comes back for sketches that wire up INT1.
+  {
+    const uint8_t fastBits = ICM42688_BIT_INT_TPULSE_DURATION
+                           | ICM42688_BIT_INT_TDEASSERT_DISABLE;
+    uint8_t intCfg1 = readRegister(ICM42688_REG_INT_CONFIG1);
+    if (_getHzFromODR(_odr) >= 4000) intCfg1 |= fastBits;
+    else                             intCfg1 &= (uint8_t)~fastBits;
+    writeRegister(ICM42688_REG_INT_CONFIG1, intCfg1);
   }
 
   uint8_t odd = (uint8_t)_odr;
@@ -227,7 +259,7 @@ void ICM42688P::enforceBandwidthLimit() {
 }
 
 void ICM42688P::setODR(ICM_ODR odr) {
-  _odr = odr;
+  _requestedOdr = odr;
   enforceBandwidthLimit();
 }
 
@@ -279,27 +311,93 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   if (mode == FIFO_16BIT) {
     // Stream-to-FIFO + ACCEL_EN + GYRO_EN
     // Without ACCEL_EN and GYRO_EN FIFO receives no data!
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03);  
+    // Bit 6 = FIFO_RESUME_PARTIAL_RD. This driver reads the FIFO in bursts and
+    // routinely stops before the buffer is empty, which is exactly the
+    // "interrupted read" the bit governs: left clear, the read pointer rewinds
+    // to the start of the FIFO and the next burst re-reads bytes already
+    // consumed instead of advancing, so the FIFO never actually drains.
+    writeRegister(ICM42688_REG_FIFO_CONFIG1,
+                  ICM42688_BIT_FIFO_RESUME_PARTIAL_RD | 0x03);
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    
   } 
   else if (mode == FIFO_20BIT_HIRES) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
     // HIRES_EN + ACCEL_EN + GYRO_EN (all 3 bits required!)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);
+    writeRegister(ICM42688_REG_FIFO_CONFIG1,
+                  ICM42688_BIT_FIFO_RESUME_PARTIAL_RD | 0x13);
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
 
   if (mode != FIFO_NONE) {
+    // FIFO_COUNT must report BYTES, big-endian, because that is what
+    // availablePackets() and fillFIFOBuffer() decode. Both are the power-on
+    // defaults, but a sketch (or a previous library) may have changed them, and
+    // a count in RECORDS silently reads 16-20x too small: the drain then leaves
+    // most of the FIFO behind on every pass and it fills up regardless of how
+    // fast the loop runs.
+    uint8_t intf = readRegister(ICM42688_REG_INTF_CONFIG0);
+    intf &= (uint8_t)~ICM42688_BIT_FIFO_COUNT_REC;   // 0 = count in bytes
+    intf |= ICM42688_BIT_FIFO_COUNT_ENDIAN;          // 1 = big endian
+    writeRegister(ICM42688_REG_INTF_CONFIG0, intf);
+
     // Enable the FIFO_FULL condition so it latches in INT_STATUS and overflow
     // becomes detectable. Read-modify-write leaves the data-ready routing alone.
     // This also makes the INT1 pin pulse on FIFO full, which is harmless when
     // the pin is unused.
+    //
+    // Bit 1 in both registers: FIFO_FULL_INT1_EN here lines up with
+    // FIFO_FULL_INT in INT_STATUS. FIFO_THS is bit 2 in both.
     uint8_t intSource = readRegister(ICM42688_REG_INT_SOURCE0);
-    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_BIT_FIFO_FULL);
+    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_INT_SOURCE0_FIFO_FULL);
   }
 
   enforceBandwidthLimit();
+}
+
+bool ICM42688P::stepDownODR() {
+  // Descending ladder. The enum is not ordered by frequency - ODR_500HZ is 0xF,
+  // below ODR_12_5HZ's 0xB - so the order has to be spelled out.
+  static const ICM_ODR ladder[] = {
+    ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ,
+    ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ
+  };
+  const uint8_t n = sizeof(ladder) / sizeof(ladder[0]);
+
+  uint8_t cur = n;
+  for (uint8_t i = 0; i < n; i++) {
+    if (ladder[i] == _odr) { cur = i; break; }
+  }
+  if (cur >= n - 1) return false;   // Unknown, or already at the bottom
+
+  const ICM_ODR next = ladder[cur + 1];
+  Serial.print(F("Voltino TriSense: "));
+  Serial.print(_getHzFromODR(_odr));
+  Serial.print(F(" Hz could not be serviced - falling back to "));
+  Serial.print(_getHzFromODR(next));
+  Serial.println(F(" Hz."));
+
+  setODR(next);    // Also becomes the new request, so it will not be raised back
+  flushFIFO();     // Anything still buffered was sampled at the old rate
+  return true;
+}
+
+uint16_t ICM42688P::availablePackets() {
+  if (_fifoMode == FIFO_NONE) return 1;
+
+  uint16_t buffered = (_fifoBufIndex < _fifoBufCount) ? (uint16_t)(_fifoBufCount - _fifoBufIndex) : 0;
+  if (_fifoPacketSize == 0) return buffered;
+
+  uint8_t countBuf[2];
+  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
+  uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
+
+  // Same sanity check fillFIFOBuffer() applies: a count beyond what the part can
+  // physically report means the read was garbled, so trust only what is already
+  // buffered. The bound includes the read cache - see ICM42688_FIFO_COUNT_MAX.
+  if (fifoBytes > ICM42688_FIFO_COUNT_MAX) return buffered;
+
+  return buffered + (fifoBytes / _fifoPacketSize);
 }
 
 void ICM42688P::flushFIFO() {
@@ -327,6 +425,13 @@ uint32_t ICM42688P::getFIFOOverflowCount() { return _fifoOverflowCount; }
 void ICM42688P::resetFIFOOverflowCount() {
   _fifoOverflowCount = 0;
   _fifoOverflowFlag = false;
+}
+
+uint32_t ICM42688P::getLostPacketCount() { return _lostPacketTotal; }
+
+void ICM42688P::resetLostPacketCount() {
+  _lostPacketTotal = 0;
+  _lostPacketPrimed = false;   // Re-baseline against the chip's counter
 }
 
 // Bulk read of FIFO_DATA. The FIFO read pointer advances per byte, so on I2C the
@@ -358,14 +463,14 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   // This only reports anything because setFIFOMode() enables FIFO_FULL in
   // INT_SOURCE0 - the status bit does not latch for a disabled source.
   uint8_t intStatus = readRegister(ICM42688_REG_INT_STATUS);
-  if (intStatus & ICM42688_BIT_FIFO_FULL) overflow = true;
+  if (intStatus & ICM42688_INT_STATUS_FIFO_FULL) overflow = true;
 
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
   uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
 
-  // A count above the physical FIFO size means a garbled read - discard it.
-  if (fifoBytes > ICM42688_FIFO_BYTES) return 0;
+  // A count beyond what the part can physically report means a garbled read.
+  if (fifoBytes > ICM42688_FIFO_COUNT_MAX) return 0;
 
   // Detector 2: config-free backstop. A count within one packet of the 2 KB
   // capacity means the FIFO is saturated, so samples are being dropped (or are
@@ -376,6 +481,26 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   if (overflow) {
     _fifoOverflowFlag = true;
     if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
+
+    // Both detectors above answer "is the FIFO full", which is not the same
+    // question as "did we lose anything" - a FIFO sitting full loses nothing so
+    // long as the drain keeps pace, and a single stalled loop loses hundreds of
+    // packets while raising one flag. The part keeps the real figure itself, so
+    // read it rather than inferring one. Polled only on an overflow event to
+    // keep two register reads out of the normal path.
+    uint8_t lost[2];
+    readRegisters(ICM42688_REG_FIFO_LOST_PKT0, lost, 2);
+    const uint16_t raw = (uint16_t)lost[0] | ((uint16_t)lost[1] << 8);
+
+    if (!_lostPacketPrimed) {
+      _lostPacketPrimed = true;
+    } else {
+      // Unsigned subtraction, so a wrap of the 16-bit register still yields the
+      // right increment as long as fewer than 65536 packets were lost between
+      // two overflow events.
+      _lostPacketTotal += (uint32_t)(uint16_t)(raw - _lostPacketLastRaw);
+    }
+    _lostPacketLastRaw = raw;
   }
 
   uint16_t packets = fifoBytes / _fifoPacketSize;
@@ -453,20 +578,33 @@ bool ICM42688P::readSensorData(float& ax, float& ay, float& az, float& gx, float
   return true;
 }
 
+// Hands back the next usable packet in the burst buffer, refilling from the
+// hardware when it runs dry, and returns nullptr when nothing is available.
+//
+// Header bit 7 marks an empty/message packet. Such a packet still occupies a
+// full packet slot, so the ones behind it are perfectly good and stay aligned -
+// it is skipped rather than treated as a fault. The previous code dropped the
+// ENTIRE burst on the first one and made the caller abort its drain, which at a
+// high ODR meant throwing away up to a hundred valid samples and then meeting
+// the same packet again on the next pass: once one appeared, the driver could
+// fall permanently behind the sensor.
+const uint8_t* ICM42688P::nextFIFOPacket() {
+  // Bounded so a FIFO returning nothing but 0xFF (read past the end, or a
+  // sensor that has stopped streaming) cannot spin here forever.
+  for (uint16_t guard = 0; guard < 2 * (uint16_t)FIFO_BURST_PACKETS + 4; guard++) {
+    if (_fifoBufIndex >= _fifoBufCount) {
+      if (fillFIFOBuffer() == 0) return nullptr;
+    }
+    const uint8_t* packet = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
+    _fifoBufIndex++;
+    if ((packet[0] & 0x80) == 0) return packet;
+  }
+  return nullptr;
+}
+
 bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  if (_fifoBufIndex >= _fifoBufCount) {
-    if (fillFIFOBuffer() == 0) return false;
-  }
-
-  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
-  _fifoBufIndex++;
-
-  // Header bit 7 set marks an empty/message packet: the rest of the burst is
-  // not trustworthy, so drop it and resynchronise on the next call.
-  if ((buffer[0] & 0x80) != 0) {
-    invalidateFIFOBuffer();
-    return false;
-  }
+  const uint8_t* buffer = nextFIFOPacket();
+  if (buffer == nullptr) return false;
 
   int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
   int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
@@ -488,17 +626,8 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
 // [VOLTINO FIX] PERFEKTNÍ 20-BIT PARSOVÁNÍ PODLE TDK DATASHEETU
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
-  if (_fifoBufIndex >= _fifoBufCount) {
-    if (fillFIFOBuffer() == 0) return false;
-  }
-
-  const uint8_t* buffer = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
-  _fifoBufIndex++;
-
-  if ((buffer[0] & 0x80) != 0) {
-    invalidateFIFOBuffer();
-    return false;
-  }
+  const uint8_t* buffer = nextFIFOPacket();
+  if (buffer == nullptr) return false;
 
   // Extrakce 20-bit hodnot podle TDK Packet 4 (Byte 17, 18, 19 sdílejí bity)
   // Byte 17 (0x11): Bity 7:4 = Gyro X [3:0], Bity 3:0 = Accel X [3:0]
@@ -555,19 +684,33 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   unsigned long startT = millis();
   unsigned long lastMicros = micros();
   
-  while(count < samples) {
-    if (millis() - startT > 10000) { 
-      Serial.println(F("Error: Sensor read timeout during calibration."));
-      break;
-    }
-    
-    if (micros() - lastMicros >= 1000) {
-      lastMicros = micros();
-      if(readIMU(ax, ay, az, gx, gy, gz)) {
-        gxSum += gx; gySum += gy; gzSum += gz;
-        count++;
+  // On a timeout, drop to the next ODR down and try again rather than returning
+  // an offset averaged from a handful of samples - or none at all.
+  for (uint8_t attempt = 0; ; attempt++) {
+    gxSum = 0; gySum = 0; gzSum = 0; count = 0;
+    startT = millis();
+    lastMicros = micros();
+    bool timedOut = false;
+
+    while(count < samples) {
+      if (millis() - startT > CALIBRATION_TIMEOUT_MS) { 
+        Serial.println(F("Error: Sensor read timeout during calibration."));
+        timedOut = true;
+        break;
+      }
+      
+      if (micros() - lastMicros >= 1000) {
+        lastMicros = micros();
+        if(readIMU(ax, ay, az, gx, gy, gz)) {
+          gxSum += gx; gySum += gy; gzSum += gz;
+          count++;
+        }
       }
     }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!stepDownODR()) break;   // Already as low as it goes
   }
   
   if (count > 0) {
@@ -654,6 +797,14 @@ void ICM42688P::autoCalibrateAccel() {
       float adjZ = (points[i].z - bz) * sz;
       
       float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
+
+      // A zero radius means this point sits exactly at the current centre
+      // estimate - which in practice means the sensor returned all zeros (bus
+      // fault, sensor asleep). Dividing by it produces NaN, and NaN then
+      // propagates into bx/by/bz and sx/sy/sz and silently poisons the whole
+      // calibration with no error message. Skip the point instead.
+      if (radius < 1e-6f) continue;
+
       float error = radius - 1.0f;
       float common = error / radius;
       

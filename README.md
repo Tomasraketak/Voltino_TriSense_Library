@@ -63,13 +63,24 @@ You can override precision manually by defining `FORCE_FUSION_FLOAT` or `FORCE_F
 
 ### 📦 TriSense Data Snapshot
 
-The new `getSnapshot()` method returns all sensor data in a single synchronous call:
+`getSnapshot()` fills a `TriSenseDataSnapshot` with the **most recent valid reading of every quantity**. The three sensors run at wildly different rates — the IMU up to 8 kHz, the barometer at 240 Hz, the magnetometer at just 100 Hz — so on any single call some of them genuinely have nothing new to give. The library keeps the last good value of each block and refreshes only what the hardware actually delivered, so the struct is never partially stale-but-unmarked and never zeroed out mid-flight.
+
+In FIFO mode the IMU block is **drained to the newest packet**, not the oldest queued one — a snapshot should mean "now", not "whatever has been sitting in the buffer longest".
 
 ```cpp
 TriSenseDataSnapshot data;
-sensor.getSnapshot(data);
-// data.accelX, data.gyroX, data.magX, data.pressure, data.temperature ...
+sensor.getSnapshot(data);          // always populated once every block has read once
+
+data.accelX, data.gyroZ, data.magY, data.pressure, data.temperature;
+
+data.imuFresh;    // did THIS call refresh the IMU block?
+data.magFresh;    // ... the magnetometer?
+data.baroFresh;   // ... the barometer?
+
+data.magAgeUs;    // microseconds since the magnetometer was last refreshed
 ```
+
+The return value is `true` once every block has produced at least one valid reading — i.e. once the snapshot is fully meaningful. It is **not** `false` merely because a sensor had no new sample this time round; use the `*Fresh` flags for that, and the `*AgeUs` fields (`0xFFFFFFFF` = never read) to tell a 200 µs old sample from a 3 s old one left behind by a disconnected sensor.
 
 ### 🧮 Full-Batch Accelerometer Averaging
 
@@ -98,6 +109,13 @@ Integration timing is derived from the **MCU's own `micros()`**, never from the 
 This keeps quaternion integration correct under CPU load and bus contention without trusting the sensor's clock. `getActualFusionHz()` reports the measured update rate of the fusion loop.
 
 ---
+
+## 📖 Practical Guide
+
+The [**Practical Guide**](docs/GUIDE.md) walks through wiring, choosing an ODR
+and FIFO mode, writing a loop that keeps up at high rates, the full calibration
+sequence, and troubleshooting. Start there if you are new to the module; the
+API reference below is the lookup table for when you already know what you want.
 
 ## Installation
 
@@ -523,14 +541,15 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 
 | Method | Description |
 |--------|-------------|
-| `beginAll(mode, csPin, freq)` | Initialize all hardware (Hybrid or I2C-only) |
-| `beginBMP(addr)` | Initialize BMP580 individually |
-| `beginMAG()` | Initialize AK09918C individually |
-| `beginIMU(busType, csPin, freq)` | Initialize ICM-42688-P individually |
-| `resetHardwareOffsets()` | Clear internal IMU offset registers |
+| `beginAll(mode, csPin, freq, wire)` | Initialize all hardware (Hybrid or I2C-only). `wire` selects the shared I2C bus (default `Wire`) |
+| `beginBMP(addr, wire)` | Initialize BMP580 individually |
+| `beginMAG(wire)` | Initialize AK09918C individually |
+| `beginIMU(busType, csPin, freq, wire)` | Initialize ICM-42688-P individually |
+| `getWire()` | The `TwoWire` instance every sensor on the module shares |
+| `resetHardwareOffsets()` | Select IMU register bank 0 (recovery hook; offsets are applied in software, not in the chip's OFFSET_USER registers) |
 | `autoCalibrateGyro(samples)` | Compute and apply gyro software offsets |
 | `autoCalibrateAccel()` | Guided 6-point accelerometer calibration |
-| `getSnapshot(data)` | Read all sensors into a `TriSenseDataSnapshot` struct |
+| `getSnapshot(data)` | Fill a `TriSenseDataSnapshot` with the newest reading of every quantity (see below) |
 | `readPressure()` | Get pressure in Pa (smart-cached) |
 | `readTemperature()` | Get temperature in °C (smart-cached) |
 | `readAltitude(seaLevelPa)` | Get altitude in meters. Reference pressure is in **Pascals** (default `101325.0`) |
@@ -553,12 +572,34 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
 | `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
 | `readTemperature()` | Read internal IMU temperature |
-| `setAccelOffset(x, y, z)` | Set software accelerometer offsets |
-| `setAccelScale(x, y, z)` | Set software accelerometer scale factors |
-| `setGyroOffset(x, y, z)` | Set software gyroscope offsets |
+| `setAccelOffset(x, y, z)` | Set software accelerometer offsets (**sensor axes**) |
+| `setAccelScale(x, y, z)` | Set software accelerometer scale factors (**sensor axes**) |
+| `setGyroOffset(x, y, z)` | Set software gyroscope offsets (**sensor axes**) |
 | `getODRHz()` | Get current ODR in Hz |
 | `autoCalibrateGyro(samples)` | Auto-calibrate gyroscope bias |
 | `autoCalibrateAccel()` | 6-point sphere fit calibration |
+
+> **Where calibration lives.** All accelerometer and gyroscope offsets/scales are
+> stored in one place — the `ICM42688P` driver — and are always expressed in the
+> **sensor's own axes**, applied to the raw sample before the mount remap:
+>
+> ```
+> accel_out = (accel_raw - accOffset) * accScale
+> gyro_out  =  gyro_raw  - gyrOffset
+> ```
+>
+> So a value you read with `getAccelOffset()` / `getGyroOffset()` and save to
+> EEPROM can be handed straight back to the matching setter at **any**
+> `setMountOrientation()` setting. `TriSenseFusion::setGyroOffsets()` and
+> `calibrateAccelStatic()` forward into this same storage, so calibrations
+> refine each other instead of stacking.
+>
+> *Changed in 1.5.0:* the fusion layer used to keep a second set of offsets
+> applied after the mount remap. Setting both subtracted the bias twice, and a
+> driver value fed into the fusion setter landed on the wrong axis for every
+> orientation except `ORIENTATION_Z_UP`. The fusion-layer `accelOffset[]` /
+> `gyroOffset[]` fields are gone; code touching them directly will no longer
+> compile, which is deliberate — a silent no-op would be worse.
 
 ### `BMP580` Class
 
@@ -596,7 +637,7 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | Method | Description |
 |--------|-------------|
 | `initOrientation(samples)` | Initialize quaternion from initial accel/mag readings |
-| `calibrateAccelStatic(samples)` | Simple static gravity offset calibration |
+| `calibrateAccelStatic(samples)` | 1-point gravity calibration; refines the driver's accel offset (**sensor axes**) |
 | `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
 | `getMagHeadingDegrees()` | Tilt-compensated, magnetometer-only heading (0–360°), independent of the fused/gyro yaw |
 | `getGlobalAcceleration(x, y, z, unit)` | World-frame acceleration, **gravity included** (batch-averaged, see above) |

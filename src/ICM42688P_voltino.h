@@ -23,6 +23,12 @@
 #define ICM42688_REG_FIFO_CONFIG2  0x60
 #define ICM42688_REG_FIFO_CONFIG3  0x61
 #define ICM42688_REG_INT_SOURCE0   0x65
+// INT_CONFIG1 (0x64). Both of these MUST be set once ODR reaches 4 kHz: the
+// default interrupt pulse is 100 us and the mandatory de-assert window another
+// 100 us, while a 4 kHz sample period is 250 us and a 32 kHz one just 31 us.
+#define ICM42688_REG_INT_CONFIG1   0x64
+#define ICM42688_BIT_INT_TPULSE_DURATION    0x40  // 1 = 8 us pulse (else 100 us)
+#define ICM42688_BIT_INT_TDEASSERT_DISABLE  0x20  // 1 = no 100 us de-assert wait
 #define ICM42688_REG_WHO_AM_I      0x75
 #define ICM42688_REG_BANK_SEL      0x76
 #define ICM42688_REG_PWR_MGMT0     0x4E
@@ -33,11 +39,48 @@
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
 
-// Bit 1 in both INT_STATUS (FIFO_FULL_INT) and INT_SOURCE0 (FIFO_FULL_INT1_EN).
-#define ICM42688_BIT_FIFO_FULL 0x02
+// FIFO_FULL is bit 1 in BOTH registers, and FIFO_THS is bit 2 in both:
+//   INT_STATUS  (0x2D) bit 1 = FIFO_FULL_INT      (bit 2 = FIFO_THS_INT)
+//   INT_SOURCE0 (0x65) bit 1 = FIFO_FULL_INT1_EN  (bit 2 = FIFO_THS_INT1_EN)
+#define ICM42688_INT_STATUS_FIFO_FULL   0x02
+#define ICM42688_INT_SOURCE0_FIFO_FULL  0x02
 
 // Hardware FIFO is 2 KB: 128 x 16-byte packets, or 102 x 20-byte packets.
 #define ICM42688_FIFO_BYTES 2048
+
+// FIFO_COUNT may legitimately exceed the 2 KB array. On top of that memory the
+// part has a read cache two packets wide, so the datasheet puts the reachable
+// total at 2048 bytes (2040 for 20-byte packets) plus one packet, and asks for
+// 2080 bytes of driver allocation because bus timing is non-deterministic.
+// Sanity-checking a count against 2048 therefore rejects counts that are
+// perfectly valid - and a rejected count means zero packets returned, so the
+// drain stalls exactly when the FIFO is at its fullest.
+#define ICM42688_FIFO_COUNT_MAX 2080
+
+// INTF_CONFIG0 (0x4C) - FIFO count format.
+#define ICM42688_REG_INTF_CONFIG0       0x4C
+#define ICM42688_BIT_FIFO_COUNT_REC     0x40  // 1 = count in records, 0 = count in BYTES
+#define ICM42688_BIT_FIFO_COUNT_ENDIAN  0x20  // 1 = big endian (power-on default)
+
+// FIFO_CONFIG1 (0x5F) bit 6. With this clear, a read that does not consume the
+// whole FIFO is not resumable: the next read restarts from the beginning.
+#define ICM42688_BIT_FIFO_RESUME_PARTIAL_RD 0x40
+
+// Hardware counter of packets discarded on overflow in Stream mode (16-bit).
+#define ICM42688_REG_FIFO_LOST_PKT0 0x6C
+#define ICM42688_REG_FIFO_LOST_PKT1 0x6D
+
+// Upper bound on any blocking calibration routine. These wait for the sensor to
+// deliver samples, and a sensor that has stopped delivering must not hang the
+// sketch: without a bound the call never returns and nothing is ever printed
+// again, which is indistinguishable from a crash.
+#define CALIBRATION_TIMEOUT_MS 10000UL
+
+// How many times a blocking calibration may drop to the next ODR down and try
+// again before giving up. Collecting a thousand samples takes well under a
+// second at any rate the sensor offers, so hitting the timeout at all means the
+// configured rate cannot be serviced - a lower one usually can.
+#define CALIBRATION_ODR_FALLBACK_ATTEMPTS 4
 
 enum ICM_BUS {
   BUS_I2C,
@@ -91,19 +134,47 @@ public:
   
   void setDebug(bool enable);
 
+  // Selects the I2C bus for BUS_I2C mode. Must be called BEFORE begin().
+  // Ignored in BUS_SPI mode. The whole TriSense module shares one bus, so
+  // TriSense::beginAll() sets this for you.
+  void setWire(TwoWire &wire);
+
   // --- Configuration ---
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
   void setGyroFS(ICM_GYRO_FS fs);
   void setFIFOMode(ICM_FIFO_MODE mode);
   
-  int getODRHz(); 
+  int getODRHz();               // ODR actually in effect (may be below what you asked for)
+  int getRequestedODRHz();      // ODR you asked for via setODR()
+
+  // Drops to the next ODR down the ladder and makes that the new request, so
+  // the bandwidth limiter will not raise it again. Returns false if already at
+  // the bottom (12.5 Hz), leaving the rate untouched.
+  //
+  // This is the recovery path for a rate the system turns out not to be able to
+  // service. Nothing calls it automatically during normal streaming - a rate
+  // that silently sags under load is worse than one that stays put and tells
+  // you - but the blocking calibration routines use it when they time out, and
+  // a sketch that detects it is falling behind can call it directly.
+  //
+  // ODR is one of the few registers the datasheet allows to be changed while
+  // the sensor is running, so no power-down cycle is needed. The FIFO is
+  // flushed, because packets already in it were captured at the old rate.
+  bool stepDownODR();
   
   // [VOLTINO FIX] Helper method to dynamically adapt fusion integration based on buffer state
   ICM_FIFO_MODE getFIFOMode(); 
 
   // [VOLTINO FIX] New rescue function added to header!
   void flushFIFO();
+
+  // How many packets readFIFO() can hand out right now: whatever is still held
+  // in the software burst buffer, plus whatever the hardware FIFO reports.
+  // Costs one FIFO_COUNT read. Lets a caller size a batch BEFORE draining it,
+  // so it can work out the per-sample dt without buffering the packets first.
+  // Returns 1 in FIFO_NONE mode (a direct register read always has "one" sample).
+  uint16_t availablePackets();
 
   // --- FIFO overflow monitoring ---
   // The hardware FIFO holds 2 KB. If the sketch does not drain it fast enough
@@ -114,9 +185,23 @@ public:
   // Note: this reads INT_STATUS once per FIFO refill, and that register is
   // read-to-clear - so if your sketch also drives the INT pins and inspects
   // INT_STATUS itself, expect the driver to have consumed the flags first.
+  // NOTE ON THE COUNT: this counts EVENTS - refills that found the FIFO full -
+  // not lost samples. One stalled loop produces one event but may lose hundreds
+  // of packets; a FIFO that merely sits full produces an event per refill while
+  // losing nothing. To judge actual data loss, compare getActualFusionHz()
+  // against getODRHz(): if they match, nothing is being lost.
   bool fifoOverflowed();            // True if an overflow occurred since the last call (self-clearing)
-  uint32_t getFIFOOverflowCount();  // Total overflow events since boot / last reset
+  uint32_t getFIFOOverflowCount();  // Total overflow EVENTS since boot / last reset
   void resetFIFOOverflowCount();
+
+  // Packets the SENSOR reports having discarded, read straight from its own
+  // FIFO_LOST_PKT registers. Unlike the event count above, this is an actual
+  // quantity of lost samples measured by the hardware rather than inferred from
+  // how full the FIFO looked, so it is the number to trust when deciding
+  // whether overflow is costing you anything. The chip's counter is 16 bits and
+  // wraps; this accumulates it into 32 across refills.
+  uint32_t getLostPacketCount();
+  void resetLostPacketCount();
 
   // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
@@ -129,9 +214,30 @@ public:
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
   // --- Calibration ---
+  // Selects register bank 0, the bank every other call in this driver expects.
+  // Kept as a recovery hook: if a sketch talks to the chip directly and leaves
+  // it parked in bank 1-4, subsequent driver reads would silently return the
+  // wrong registers, and this puts it back.
+  //
+  // It does NOT clear the chip's OFFSET_USER registers (bank 4, 0x77-0x7F) -
+  // the name is historical. In practice nothing needs it to: this driver never
+  // programs those registers, applying accel/gyro bias in software instead (see
+  // setAccelOffset / setGyroOffset), so they stay at their power-on zero anyway.
   void resetHardwareOffsets();
-  void autoCalibrateGyro(uint16_t samples = 750);
-  void autoCalibrateAccel(); 
+  // --- Calibration storage ---
+  // Every offset and scale below is expressed in the SENSOR's OWN axes and is
+  // applied to the raw sample before anything else sees it:
+  //
+  //     accel_out = (accel_raw - accOffset) * accScale
+  //     gyro_out  =  gyro_raw  - gyrOffset
+  //
+  // This is deliberately the ONLY place an accel/gyro bias is stored. The
+  // fusion layer's mount remap (TriSenseFusion::setMountOrientation) happens
+  // afterwards, on the already-corrected sample, so a value produced by one of
+  // the getters below can be saved and restored through the matching setter at
+  // any mount orientation.
+  void autoCalibrateGyro(uint16_t samples = 750);   // Board still -> gyrOffset
+  void autoCalibrateAccel();                        // 6-point sphere fit -> accOffset + accScale
   
   void setGyroSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareOffset(float ox, float oy, float oz);
@@ -160,10 +266,16 @@ public:
   float getGyroOffsetZ();
 
 private:
+  TwoWire* _wire = &Wire;
   ICM_BUS _bus;
   int8_t _csPin;
   uint8_t _i2cAddr;
   uint32_t _spiFreq;
+  // _requestedOdr is what the sketch asked for; _odr is what the bus can
+  // actually sustain in the current FIFO mode. Keeping them apart lets the
+  // requested rate be restored when the packet size (and so the bandwidth
+  // demand) drops again - see enforceBandwidthLimit().
+  ICM_ODR _requestedOdr;
   ICM_ODR _odr;
   ICM_FIFO_MODE _fifoMode;
   bool _debug;
@@ -181,10 +293,21 @@ private:
   // FIFO_DATA read serve up to FIFO_BURST_PACKETS packets, instead of two bus
   // transactions per single packet.
   static const uint8_t FIFO_MAX_PACKET_SIZE = 20;
-#if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
-  static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B buffer
+  // Sizing this BELOW the hardware FIFO's capacity (102 x 20-byte packets) means
+  // a full FIFO needs several round trips to empty, each paying its own
+  // INT_STATUS + FIFO_COUNT reads - extra latency at exactly the moment the
+  // driver is already behind. Where the RAM exists, one burst therefore covers
+  // the whole FIFO. Override with -DTRISENSE_FIFO_BURST_PACKETS=n.
+#if defined(TRISENSE_FIFO_BURST_PACKETS)
+  static const uint8_t FIFO_BURST_PACKETS = TRISENSE_FIFO_BURST_PACKETS;
+#elif defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+  static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B - an Uno has 2 KB total
+#elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350) || defined(ESP32) \
+   || defined(ARDUINO_ARCH_SAMD51) || defined(__IMXRT1062__)
+  static const uint8_t FIFO_BURST_PACKETS = 128;  // 2560 B - drains a full FIFO in one go
+                                                  // (2048/16 = 128 packets, 2048/20 = 102)
 #else
-  static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B buffer
+  static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B - conservative default
 #endif
   uint8_t _fifoBuf[FIFO_BURST_PACKETS * FIFO_MAX_PACKET_SIZE];
   uint8_t _fifoBufCount = 0;   // Packets currently held in _fifoBuf
@@ -193,7 +316,11 @@ private:
 
   bool _fifoOverflowFlag = false;
   uint32_t _fifoOverflowCount = 0;
+  uint32_t _lostPacketTotal = 0;    // Accumulated across wraps of the 16-bit register
+  uint16_t _lostPacketLastRaw = 0;  // Previous raw reading, to detect the wrap
+  bool _lostPacketPrimed = false;
 
+  const uint8_t* nextFIFOPacket();                 // Next usable packet, skipping message packets
   uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
   void readFIFOBytes(uint8_t *buf, size_t len);    // Bulk FIFO_DATA read (chunked on I2C)
   void invalidateFIFOBuffer();

@@ -1,14 +1,22 @@
 #include "TriSense.h"
 
-TriSense::TriSense() {}
+TriSense::TriSense() {
+  memset(&_last, 0, sizeof(_last));
+}
 
-bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
+bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
   _mode = mode;
-  Wire.begin();
-  if (!bmp.begin()) return false;
-  if (!mag.begin()) return false;
+  _wire = &wire;
+
+  // One shared bus for the whole module. Started once here, so the individual
+  // drivers never have to guess which TwoWire instance they are on.
+  _wire->begin();
+
+  if (!bmp.begin(BMP580_PRIMARY_I2C_ADDR, *_wire)) return false;
+  if (!mag.begin(AK_ODR_100HZ, *_wire)) return false;
 
   if (_mode == MODE_I2C) {
+    imu.setWire(*_wire);
     if (!imu.begin(BUS_I2C)) return false;
     imu.setODR(DEFAULT_IMU_ODR); 
   } else {
@@ -26,27 +34,81 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
   return true;
 }
 
-bool TriSense::beginBMP(uint8_t addr) { return bmp.begin(addr); }
-bool TriSense::beginMAG() { return mag.begin(); }
-bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq) { return imu.begin(busType, csPin, freq); }
+bool TriSense::beginBMP(uint8_t addr, TwoWire &wire) { _wire = &wire; return bmp.begin(addr, wire); }
+bool TriSense::beginMAG(TwoWire &wire) { _wire = &wire; return mag.begin(AK_ODR_100HZ, wire); }
+bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq, TwoWire &wire) {
+  if (busType == BUS_I2C) { _wire = &wire; imu.setWire(wire); }
+  return imu.begin(busType, csPin, freq);
+}
 
 void TriSense::resetHardwareOffsets() { imu.resetHardwareOffsets(); }
 void TriSense::autoCalibrateGyro(uint16_t samples) { imu.autoCalibrateGyro(samples); }
 void TriSense::autoCalibrateAccel() { imu.autoCalibrateAccel(); }
 
 bool TriSense::getSnapshot(TriSenseDataSnapshot &data) {
-  float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
-  bool imuOk = imu.readFIFO(ax, ay, az, gx, gy, gz);
-  data.accelX = ax; data.accelY = ay; data.accelZ = az;
-  data.gyroX = gx;  data.gyroY = gy;  data.gyroZ = gz;
+  const uint32_t now = micros();
 
-  bool magOk = mag.readData();
-  data.magX = mag.x; data.magY = mag.y; data.magZ = mag.z;
+  // --- IMU ------------------------------------------------------------------
+  // In FIFO mode the oldest queued packet is not what a "snapshot" means, so
+  // drain what is buffered and keep the newest. The loop is bounded twice over:
+  // by the FIFO emptying, and by a hard cap so a misbehaving sensor that always
+  // reports data-ready can never stall the caller.
+  {
+    float ax, ay, az, gx, gy, gz;
+    const bool streaming = (imu.getFIFOMode() != FIFO_NONE);
+    uint16_t guard = streaming ? 256 : 1;   // Direct register reads never "empty"
 
-  data.pressure = bmp.readPressure();
-  data.temperature = bmp.readTemperature();
+    bool got = false;
+    while (guard-- && imu.readFIFO(ax, ay, az, gx, gy, gz)) {
+      _last.accelX = ax; _last.accelY = ay; _last.accelZ = az;
+      _last.gyroX  = gx; _last.gyroY  = gy; _last.gyroZ  = gz;
+      got = true;
+      if (!streaming) break;
+    }
 
-  return imuOk && magOk;
+    if (got) { _haveIMU = true; _lastImuUs = now; }
+    data.imuFresh = got;
+  }
+
+  // --- Magnetometer ---------------------------------------------------------
+  // readData() returns false whenever DRDY is clear, which at 100 Hz ODR is the
+  // common case in a fast loop. That is not an error, it just means "nothing new".
+  {
+    const bool got = mag.readData();
+    if (got) {
+      _last.magX = mag.x; _last.magY = mag.y; _last.magZ = mag.z;
+      _haveMag = true; _lastMagUs = now;
+    }
+    data.magFresh = got;
+  }
+
+  // --- Barometer ------------------------------------------------------------
+  // BMP580 already caches internally against its own ODR, so these calls only
+  // touch the bus when a new conversion is actually ready. Compare against the
+  // previous values to report whether this call saw a new conversion.
+  {
+    const float p = bmp.readPressure();
+    const float t = bmp.readTemperature();
+    const bool got = (!_haveBaro) || (p != _last.pressure) || (t != _last.temperature);
+    if (got) { _haveBaro = true; _lastBaroUs = now; }
+    _last.pressure = p;
+    _last.temperature = t;
+    data.baroFresh = got;
+  }
+
+  // --- Publish --------------------------------------------------------------
+  data.accelX = _last.accelX; data.accelY = _last.accelY; data.accelZ = _last.accelZ;
+  data.gyroX  = _last.gyroX;  data.gyroY  = _last.gyroY;  data.gyroZ  = _last.gyroZ;
+  data.magX   = _last.magX;   data.magY   = _last.magY;   data.magZ   = _last.magZ;
+  data.pressure = _last.pressure;
+  data.temperature = _last.temperature;
+
+  // Unsigned subtraction, so these stay correct across the ~71 min micros() wrap.
+  data.imuAgeUs  = _haveIMU  ? (now - _lastImuUs)  : 0xFFFFFFFFUL;
+  data.magAgeUs  = _haveMag  ? (now - _lastMagUs)  : 0xFFFFFFFFUL;
+  data.baroAgeUs = _haveBaro ? (now - _lastBaroUs) : 0xFFFFFFFFUL;
+
+  return _haveIMU && _haveMag && _haveBaro;
 }
 
 float TriSense::readPressure() { return bmp.readPressure(); }
@@ -71,17 +133,80 @@ float TriSenseFusion::getActualFusionHz() {
   return _actualFusionHz;
 }
 
+// Reciprocal square root - called on every quaternion normalisation, so it sits
+// in the hottest path of the whole fusion loop.
+//
+// Implementation is chosen per platform (see TRISENSE_HAS_HW_FPU in TriSense.h):
+//
+//   * MCU with a hardware FPU (RP2350, ESP32/S3, SAMD51, STM32F4+, nRF52840,
+//     Teensy): sqrtf() is a SINGLE instruction (VSQRT.F32 on ARM), followed by
+//     one divide. On the RP2350 that is ~20 cycles total and exact to the last
+//     bit. The bit-trick below needs ~4 multiplies plus a shift and is both
+//     SLOWER and less accurate there, so it is not used.
+//
+//   * MCU without an FPU (Arduino Uno/Nano/Mega, RP2040, ESP32-C3, SAMD21):
+//     software sqrtf() costs hundreds of cycles, so the classic Quake bit-trick
+//     wins. Two Newton-Raphson steps are used instead of one: the seed alone is
+//     good to ~3.4%, one step to ~1.8e-3, two steps to ~5e-6. The second step
+//     costs 2 multiplies and a subtract, which is cheap insurance given this
+//     result scales the quaternion on EVERY integration step - a systematic
+//     0.18% norm error would otherwise accumulate into the attitude.
+//
+// The bit reinterpretation goes through memcpy rather than a pointer cast.
+// Casting a float* to uint32_t* violates C++ strict aliasing and GCC is free to
+// miscompile it at -O2; memcpy is the well-defined spelling and every compiler
+// lowers it to the same single register move (zero cost).
 FUSION_MATH_TYPE TriSenseFusion::invSqrt(FUSION_MATH_TYPE x) {
 #if defined(FORCE_FUSION_DOUBLE)
   return 1.0 / sqrt(x);
+#elif defined(TRISENSE_HAS_HW_FPU)
+  return (FUSION_MATH_TYPE)(1.0f / sqrtf((float)x));
 #else
-  float xhalf = 0.5f * (float)x;
-  uint32_t i = *(uint32_t*)&x;
+  const float f = (float)x;
+  const float xhalf = 0.5f * f;
+
+  uint32_t i;
+  memcpy(&i, &f, sizeof(i));
   i = 0x5f3759df - (i >> 1);
-  float y = *(float*)&i;
-  y = y * (1.5f - xhalf * y * y);
+
+  float y;
+  memcpy(&y, &i, sizeof(y));
+  y = y * (1.5f - xhalf * y * y);   // Newton step 1 -> ~1.8e-3 worst case
+  y = y * (1.5f - xhalf * y * y);   // Newton step 2 -> ~5e-6 worst case
   return (FUSION_MATH_TYPE)y;
 #endif
+}
+
+// Sanity bounds on the measured per-sample dt.
+//
+// The measured value (elapsed wall time / packets drained) is the RIGHT number
+// to integrate with, and it is deliberately allowed to exceed the nominal
+// sample period. When the FIFO overflows - a stalled loop, a long SD write -
+// packets are genuinely lost, and spreading the surviving samples across the
+// real elapsed time is the best available estimate of how far the device turned
+// while we were not looking. It keeps the integrated time consistent with the
+// clock.
+//
+// The old code clamped anything above 2x nominal back DOWN to exactly nominal,
+// which threw that time away: 128 packets drained after a 300 ms stall at 1 kHz
+// integrated 128 ms and silently discarded 172 ms of rotation - about 15 deg at
+// 90 deg/s, unrecoverable, and triggered precisely when the MCU was busiest.
+//
+// So the upper bound here is NOT a nominal-rate check; it is purely a numerical
+// guard. gyroIntegration() is a first-order quaternion update, only valid while
+// the rotation per step stays small, so an absurd dt (a multi-second gap after
+// flushFIFO(), a stale _lastIntegrationTime) must not be fed into it. 50 ms
+// keeps the first-order error negligible at any realistic rate, and at slow
+// ODRs the floor makes sure the cap never drops below one real sample period.
+//
+// The lower bound stays: a dt well under nominal means more packets arrived than
+// elapsed time allows, which is physically impossible - the sensor's own sample
+// period is the truth there.
+void TriSenseFusion::clampSampleDt(FUSION_MATH_TYPE& dt, FUSION_MATH_TYPE ideal_dt) {
+  FUSION_MATH_TYPE dt_cap = (FUSION_MATH_TYPE)0.05;
+  if (dt_cap < ideal_dt) dt_cap = ideal_dt;
+  if (dt > dt_cap) dt = dt_cap;
+  if (dt < ideal_dt * (FUSION_MATH_TYPE)0.5) dt = ideal_dt;
 }
 
 FUSION_MATH_TYPE TriSenseFusion::gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma) {
@@ -107,6 +232,28 @@ void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
     case ORIENTATION_Z_UP:
     default:
       break; 
+  }
+}
+
+// Exact inverse of remapAxes(). Every orientation above is a signed permutation
+// of the axes, so the inverse is another signed permutation - no numerics, no
+// error. Used to express a correction that was worked out in the mount frame
+// back in the sensor's own axes, which is where all calibration is stored.
+void TriSenseFusion::unremapAxes(float& x, float& y, float& z) {
+  float tx = x, ty = y, tz = z;
+  switch (_mountOrientation) {
+    case ORIENTATION_X_UP:
+      x = tz; y = ty; z = -tx;
+      break;
+    case ORIENTATION_Y_UP:
+      x = tx; y = tz; z = -ty;
+      break;
+    case ORIENTATION_Z_DOWN:
+      x = -tx; y = ty; z = -tz;
+      break;
+    case ORIENTATION_Z_UP:
+    default:
+      break;
   }
 }
 
@@ -146,7 +293,13 @@ void TriSenseFusion::setMagCalibration(float hard[3], float soft[3][3]) {
   for(int i=0; i<3; i++) for(int j=0; j<3; j++) magSoftIron[i][j] = soft[i][j];
 }
 void TriSenseFusion::setDeclination(float deg) { magneticDeclination = deg; }
-void TriSenseFusion::setGyroOffsets(float x, float y, float z) { gyroOffset[0] = x; gyroOffset[1] = y; gyroOffset[2] = z; }
+// Forwards to the driver, so there is exactly one place a gyro bias is stored.
+// The values are in the SENSOR's own axes - the same axes the driver's
+// autoCalibrateGyro() and getGyroOffset() use - so a bias read back from the
+// driver (or restored from EEPROM) can be handed straight back here regardless
+// of the mount orientation. The mount remap happens afterwards, on the already
+// bias-corrected sample.
+void TriSenseFusion::setGyroOffsets(float x, float y, float z) { if (_imu) _imu->setGyroOffset(x, y, z); }
 void TriSenseFusion::setMagHardIron(float x, float y, float z) { magHardIron[0] = x; magHardIron[1] = y; magHardIron[2] = z; }
 void TriSenseFusion::setMagSoftIron(float matrix[3][3]) { for(int i=0; i<3; i++) for(int j=0; j<3; j++) magSoftIron[i][j] = matrix[i][j]; }
 void TriSenseFusion::setYawKi(float ki) { yawKi = ki; }
@@ -158,73 +311,145 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
   
-  if (_imu->getFIFOMode() != FIFO_NONE) {
+  // Discard whatever the FIFO already holds, so the average below is taken from
+  // samples captured AFTER the user was told to hold still.
+  //
+  // This used to be `while (readFIFO(...));` - drain until it comes up empty.
+  // That loop has no fixed point when the sensor refills faster than the loop
+  // can consume: at a high ODR readFIFO() simply never returns false and the
+  // sketch hangs here forever with no output at all. The hardware has a
+  // single-register flush for exactly this, and it is O(1).
+  _imu->flushFIFO();
+
+  // Bounded, and with a fallback. A sensor that stops delivering must not hang
+  // the sketch with no output, and a rate that cannot be serviced should step
+  // down rather than fail outright - see stepDownODR().
+  for (uint8_t attempt = 0; ; attempt++) {
+    sumX = 0; sumY = 0; sumZ = 0; count = 0;
+    const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
+    bool timedOut = false;
+
+    while(count < samples) { 
+      if ((long)(millis() - deadline) >= 0) { timedOut = true; break; }
       float ax, ay, az, gx, gy, gz;
-      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
+      if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
+        remapAxes(ax, ay, az);
+        sumX += ax; sumY += ay; sumZ += az; 
+        count++;
+      } else {
+        delay(1); 
+      }
+    }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!_imu->stepDownODR()) break;   // Already as low as it goes
+    _imu->flushFIFO();
   }
 
-  while(count < samples) { 
-    float ax, ay, az, gx, gy, gz;
-    if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
-      remapAxes(ax, ay, az);
-      sumX += ax; sumY += ay; sumZ += az; 
-      count++;
-    } else {
-      delay(1); 
-    }
-  }
+  if (count == 0) return;          // Nothing measured - leave calibration alone
+  samples = count;                 // Average over what actually arrived
   
   float avgX = (float)(sumX / samples);
   float avgY = (float)(sumY / samples);
   float avgZ = (float)(sumZ / samples);
   
-  if (abs(avgZ) > 0.7f) {
-    accelOffset[0] = avgX; accelOffset[1] = avgY;
-    accelOffset[2] = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
-  } else if (abs(avgX) > 0.7f) {
-    accelOffset[0] = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
-    accelOffset[1] = avgY; accelOffset[2] = avgZ;
-  } else if (abs(avgY) > 0.7f) {
-    accelOffset[0] = avgX;
-    accelOffset[1] = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
-    accelOffset[2] = avgZ;
+  // Which axis is pointing up can only be decided in the MOUNT frame, so the
+  // residual is worked out here, exactly as before: the up axis should read
+  // 1 g and every other axis 0 g.
+  float dx, dy, dz;
+  if (fabs(avgZ) > 0.7f) {
+    dx = avgX; dy = avgY;
+    dz = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
+  } else if (fabs(avgX) > 0.7f) {
+    dx = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
+    dy = avgY; dz = avgZ;
+  } else if (fabs(avgY) > 0.7f) {
+    dx = avgX;
+    dy = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
+    dz = avgZ;
   } else {
-    accelOffset[0] = avgX; accelOffset[1] = avgY; accelOffset[2] = avgZ - 1.0f; 
+    dx = avgX; dy = avgY; dz = avgZ - 1.0f; 
   }
+
+  // ...and then rotated back into the sensor's own axes, because that is the
+  // one place an accelerometer bias is stored (the driver's accOffset). Storing
+  // it in the mount frame instead is what used to make this calibration and the
+  // driver's autoCalibrateAccel() subtract on top of each other.
+  unremapAxes(dx, dy, dz);
+
+  if (!_imu) return;
+
+  // Fold the residual into the offset the driver already holds. The driver
+  // computes (raw - offset) * scale, so a correction of `d` on its OUTPUT costs
+  // d/scale on the offset. Reusing the existing offset (rather than replacing
+  // it) is what makes this callable a second time to refine a previous run.
+  float ox, oy, oz, sx, sy, sz;
+  _imu->getAccelOffset(ox, oy, oz);
+  _imu->getAccelScale(sx, sy, sz);
+
+  // A zero scale would mean the axis is dead anyway; leave its offset alone
+  // rather than dividing by zero and poisoning it with an infinity.
+  if (sx != 0.0f) ox += dx / sx;
+  if (sy != 0.0f) oy += dy / sy;
+  if (sz != 0.0f) oz += dz / sz;
+
+  _imu->setAccelOffset(ox, oy, oz);
 }
 
 void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
-  if (_imu->getFIFOMode() != FIFO_NONE) {
-      float ax, ay, az, gx, gy, gz;
-      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
-  }
+  // Same as in calibrateAccelStatic(): flush in one register write rather than
+  // looping until the FIFO reads empty, which never happens at a high ODR.
+  _imu->flushFIFO();
 
-  while(count < samples) {
-     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-     
-     bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
-     _mag->readData(); 
+  // Bounded with the same ODR fallback as calibrateAccelStatic(): this is the
+  // call that hung a sketch at 32 kHz with nothing printed after "keep still".
+  for (uint8_t attempt = 0; ; attempt++) {
+    axSum = 0; aySum = 0; azSum = 0;
+    mxSum = 0; mySum = 0; mzSum = 0;
+    count = 0;
+    const unsigned long deadline = millis() + CALIBRATION_TIMEOUT_MS;
+    bool timedOut = false;
 
-     if(imuReady) {
-         remapAxes(ax_raw, ay_raw, az_raw);
-         FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
-         FUSION_MATH_TYPE ay = ay_raw - accelOffset[1]; 
-         FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
-         axSum+=ax; aySum+=ay; azSum+=az;
-         
-         FUSION_MATH_TYPE mx, my, mz;
-         applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+    while(count < samples) {
+       if ((long)(millis() - deadline) >= 0) { timedOut = true; break; }
+       float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+       
+       bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
+       _mag->readData(); 
 
-         mxSum+=mx; mySum+=my; mzSum+=mz;
-         count++; 
-     } else {
-         delay(1); 
-     }
+       if(imuReady) {
+           remapAxes(ax_raw, ay_raw, az_raw);
+           FUSION_MATH_TYPE ax = ax_raw; 
+           FUSION_MATH_TYPE ay = ay_raw; 
+           FUSION_MATH_TYPE az = az_raw; 
+           axSum+=ax; aySum+=ay; azSum+=az;
+           
+           FUSION_MATH_TYPE mx, my, mz;
+           applyMagCalibration(_mag->x, _mag->y, _mag->z, mx, my, mz);
+
+           mxSum+=mx; mySum+=my; mzSum+=mz;
+           count++; 
+       } else {
+           delay(1); 
+       }
+    }
+
+    if (!timedOut) break;
+    if (attempt + 1 >= CALIBRATION_ODR_FALLBACK_ATTEMPTS) break;
+    if (!_imu->stepDownODR()) break;   // Already as low as it goes
+    _imu->flushFIFO();
   }
   
+  // Average over what actually arrived, not over what was asked for: a run cut
+  // short by the deadline would otherwise divide by too large a number and
+  // report a gravity vector shorter than 1 g, tilting the seeded attitude.
+  if (count == 0) return;          // Nothing measured - keep the identity quaternion
+  samples = count;
+
   FUSION_MATH_TYPE r, p, y; 
   getCorrectionAngles(axSum/samples, aySum/samples, azSum/samples, mxSum/samples, mySum/samples, mzSum/samples, r, p, y);
   
@@ -240,10 +465,7 @@ void TriSenseFusion::initOrientation(int samples) {
   q[2] = c1*s2*c3 + s1*c2*s3; 
   q[3] = s1*c2*c3 - c1*s2*s3;
 
-  int nominalHz = _imu->getODRHz();
-  _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   _lastIntegrationTime = micros(); 
-  _sampleCount = 0;
 }
 
 void TriSenseFusion::quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {
@@ -251,8 +473,12 @@ void TriSenseFusion::quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE&
   FUSION_MATH_TYPE cosr_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2]); 
   roll = atan2(sinr_cosp, cosr_cosp);
   
+  // fabs(), not abs(): Arduino.h defines abs() as a macro, but when <stdlib.h>'s
+  // integer abs(int) wins the lookup instead - which happens on some cores and
+  // in any translation unit that includes <cstdlib> after Arduino.h - the
+  // argument is truncated to an int and every value below 1.0 becomes 0.
   FUSION_MATH_TYPE sinp = 2.0 * (q[0] * q[2] - q[3] * q[1]); 
-  if (abs(sinp) >= 1.0) pitch = copysign((FUSION_MATH_TYPE)PI / 2.0, sinp); else pitch = asin(sinp);
+  if (fabs(sinp) >= 1.0) pitch = copysign((FUSION_MATH_TYPE)PI / 2.0, sinp); else pitch = asin(sinp);
   
   FUSION_MATH_TYPE siny_cosp = 2.0 * (q[0] * q[3] + q[1] * q[2]); 
   FUSION_MATH_TYPE cosy_cosp = 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]); 
@@ -276,6 +502,14 @@ float TriSenseFusion::getMagHeadingDegrees() {
   return AK09918C::computeHeading((float)lastMx, (float)lastMy, (float)lastMz, roll, pitch, magneticDeclination);
 }
 
+// Reference roll/pitch/yaw straight from the accelerometer and magnetometer.
+//
+// These are Euler angles and therefore degenerate at pitch = +/-90 degrees,
+// where roll and yaw stop being separable. Callers must weight the yaw this
+// returns by how far the board is from that attitude - complementaryCorrection()
+// does so with both an estimate-based and a measurement-based gain. The roll and
+// pitch corrections do not come through here at all: they use the accelerometer
+// cross product in complementaryCorrection(), which has no such singularity.
 void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
                                          FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                          FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw) {
@@ -357,15 +591,19 @@ bool SimpleTriFusion::update() {
       remapAxes(ax_raw, ay_raw, az_raw);
       remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2]; 
-      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw; lastAy = ay_raw; lastAz = az_raw; 
+      lastGx = gx_raw;  lastGy = gy_raw;  lastGz = gz_raw;
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
       FUSION_MATH_TYPE dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
       _lastIntegrationTime = nowMicros;
       if (dt <= 0.0) dt = 0.00001;
-      if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      // Numerical guard only - same reasoning as clampSampleDt(), which this
+      // path cannot use wholesale: without a FIFO the loop may poll faster than
+      // the ODR and re-read the same sample, so a dt BELOW nominal is normal
+      // here and must not be rounded up, or that sample gets integrated twice.
+      if (dt > 0.05) dt = 0.05;
       
       FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
       FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
@@ -385,91 +623,78 @@ bool SimpleTriFusion::update() {
       trackUpdateRate();
     }
   } else {
-    // === OPRAVA: POUZE VYČTU BUFFER ===
-    #if defined(__AVR__)
-      const int max_packets = 16;  
-    #else
-      const int max_packets = 128; 
-    #endif
+    // Ask the driver how many packets are waiting BEFORE draining them. That is
+    // the only thing the old two-pass version needed its 3 KB stack buffer for:
+    // perfect_dt is total_dt / packetCount, so the count had to be known up
+    // front. One FIFO_COUNT read supplies it, and the packets can then be
+    // integrated as they stream in - nothing has to be held in RAM.
+    uint16_t pending = _imu->availablePackets();
+    if (pending == 0) return false;
 
-    struct FIFOPacket { float ax, ay, az, gx, gy, gz; };
-    FIFOPacket buffer[max_packets];
-    int packetCount = 0;
+    unsigned long nowMicros = micros();
+    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+    if (total_dt <= 0.0) total_dt = 0.00001;
 
-    while (packetCount < max_packets) {
+    FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)pending;
+
+    int hz = _imu->getODRHz();
+    FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+    clampSampleDt(perfect_dt, ideal_dt);
+
+    FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+    FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+    uint16_t processed = 0;
+
+    for (uint16_t i = 0; i < pending; i++) {
         float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break; 
-        buffer[packetCount].ax = ax_raw; buffer[packetCount].ay = ay_raw; buffer[packetCount].az = az_raw;
-        buffer[packetCount].gx = gx_raw; buffer[packetCount].gy = gy_raw; buffer[packetCount].gz = gz_raw;
-        packetCount++;
-    }
+        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break;
 
-    if (packetCount > 0) {
-        dataProcessed = true;
-        
-        // === OPRAVA: MĚŘENÍ ČASU POUZE KDYŽ MÁME DATA ===
-        unsigned long nowMicros = micros();
-        if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-        FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-        _lastIntegrationTime = nowMicros; // Fix here!
-        
-        if (total_dt <= 0.0) total_dt = 0.00001;
-        FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
+        remapAxes(ax_raw, ay_raw, az_raw);
+        remapAxes(gx_raw, gy_raw, gz_raw);
 
-        // Bezpečnostní mantinely pro DT v případě záseku mikrokontroléru
-        int hz = _imu->getODRHz();
-        FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
-        if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
-        if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
+        FUSION_MATH_TYPE ax = ax_raw;
+        FUSION_MATH_TYPE ay = ay_raw;
+        FUSION_MATH_TYPE az = az_raw;
+        FUSION_MATH_TYPE gx = gx_raw;
+        FUSION_MATH_TYPE gy = gy_raw;
+        FUSION_MATH_TYPE gz = gz_raw;
 
-        // Accumulate every packet so lastA*/lastG* can publish the batch mean
-        // instead of only the final sample (see note after the loop).
-        FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
-        FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+        sumAx += ax; sumAy += ay; sumAz += az;
+        sumGx += gx; sumGy += gy; sumGz += gz;
 
-        for(int i = 0; i < packetCount; i++) {
-            float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
-            float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
+        FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
+        FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
+        FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
 
-            remapAxes(ax_raw, ay_raw, az_raw);
-            remapAxes(gx_raw, gy_raw, gz_raw);
-
-            FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
-            FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
-            FUSION_MATH_TYPE az = az_raw - accelOffset[2];
-            FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
-            FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
-            FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
-
-            sumAx += ax; sumAy += ay; sumAz += az;
-            sumGx += gx; sumGy += gy; sumGz += gz;
-
-            FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
-            FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
-
-            if (_lightweightGravityEnabled) {
-                FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
-                FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
-                FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
-                FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
-                FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
-                gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
-                gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
-                gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
-            }
-
-            gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
-            trackUpdateRate();
+        if (_lightweightGravityEnabled) {
+            FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
+            FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
+            FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
+            FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
+            FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
+            gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
+            gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
+            gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
         }
 
-        // Publish the mean of the whole batch rather than just the final packet,
-        // so getGlobalAcceleration() sees every accelerometer sample the FIFO
-        // delivered. The per-sample values above still drive the integration.
-        FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
-        lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
-        lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
+        gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
+        trackUpdateRate();
+        processed++;
     }
+
+    // Only consume the elapsed time if something was actually integrated. If the
+    // drain came up empty the interval belongs to the next call, not to nothing.
+    if (processed == 0) return false;
+    _lastIntegrationTime = nowMicros;
+    dataProcessed = true;
+
+    // Publish the mean of the whole batch rather than just the final packet, so
+    // getGlobalAcceleration() sees every accelerometer sample the FIFO delivered.
+    // The per-sample values above still drive the integration.
+    FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)processed;
+    lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
+    lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
   }
   return dataProcessed;
 }
@@ -479,8 +704,25 @@ AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFu
 void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
                                                 FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                                 FUSION_MATH_TYPE correction_dt) {
-  FUSION_MATH_TYPE totalAccelG = sqrt(ax * ax + ay * ay + az * az); 
-  FUSION_MATH_TYPE recipNorm = invSqrt(ax * ax + ay * ay + az * az); 
+  // Keep the raw vector: the tilt-compensated heading below needs the real
+  // magnitudes, and re-multiplying the normalised copy by totalAccelG just to
+  // recover them costs three multiplies and loses a little precision.
+  const FUSION_MATH_TYPE rawAx = ax, rawAy = ay, rawAz = az;
+
+  FUSION_MATH_TYPE accelSq = ax * ax + ay * ay + az * az;
+
+  // An all-zero accelerometer vector means the sensor gave us nothing (bus
+  // fault, sensor asleep) - never a real reading, since gravity alone is 1 g in
+  // free fall only. Normalising it divides by zero: invSqrt(0) is +inf on the
+  // hardware-FPU path, so ax/ay/az become inf, ex/ey become NaN, and the NaN
+  // lands in the quaternion, where it is permanent - every later normalisation
+  // reproduces it and the attitude output never recovers. Skipping the
+  // correction leaves the gyro integration to carry on alone, which is exactly
+  // the right behaviour for one missing accelerometer sample.
+  if (!(accelSq > (FUSION_MATH_TYPE)1e-12)) return;   // also catches NaN
+
+  FUSION_MATH_TYPE recipNorm = invSqrt(accelSq);
+  FUSION_MATH_TYPE totalAccelG = accelSq * recipNorm;   // sqrt(s) == s / sqrt(s)
   ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
   
   FUSION_MATH_TYPE magStrength = sqrt(mx * mx + my * my + mz * mz);
@@ -502,9 +744,36 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   
   FUSION_MATH_TYPE tilt_gain = exp(-tilt_deg_sq / (2.0 * (FUSION_MATH_TYPE)magTiltSigmaDeg * (FUSION_MATH_TYPE)magTiltSigmaDeg));
   final_mag_gain *= tilt_gain;
+
+  // --- Gimbal-lock guard on the magnetometer heading ---
+  //
+  // The quaternion integration itself cannot gimbal-lock; that is the whole
+  // point of using one. The tilt-compensated heading below can, because it goes
+  // through Euler angles: roll = atan2(ay, az) is indeterminate when ay and az
+  // both vanish, i.e. when the board points straight up or straight down. There
+  // the measured roll is pure noise, and it feeds sin(phi)/cos(phi) in the
+  // heading projection, so yaw_corr becomes meaningless rather than merely
+  // imprecise.
+  //
+  // tilt_gain above is close to zero in that attitude and mostly hides this,
+  // but it is derived from the ESTIMATED gravity direction, not the measured
+  // one - so it stays open when the estimate is wrong, which is exactly when a
+  // correction is most likely to be applied and most likely to be wrong. It is
+  // also user-tunable: magTiltSigmaDeg = 60 still lets ~40% of a garbage
+  // heading through at 90 degrees of tilt.
+  //
+  // So gate on the measurement as well. cos(pitch) = sqrt(ay^2 + az^2) for a
+  // unit gravity vector; it is 1 when level and 0 at the singularity. Ramping
+  // instead of cutting keeps the filter continuous - a step in the gain would
+  // show up as a visible jump in the fused yaw.
+  {
+    const FUSION_MATH_TYPE cos_pitch = sqrt(ay * ay + az * az);
+    const FUSION_MATH_TYPE ramp_from = (FUSION_MATH_TYPE)0.17365;  // cos(80 deg)
+    if (cos_pitch < ramp_from) final_mag_gain *= (cos_pitch / ramp_from);
+  }
   
   FUSION_MATH_TYPE roll_corr, pitch_corr, yaw_corr; 
-  getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
+  getCorrectionAngles(rawAx, rawAy, rawAz, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
   
   FUSION_MATH_TYPE siny_cosp = 2.0 * (q[0] * q[3] + q[1] * q[2]); 
   FUSION_MATH_TYPE cosy_cosp = 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]); 
@@ -559,15 +828,19 @@ bool AdvancedTriFusion::update() {
       remapAxes(ax_raw, ay_raw, az_raw);
       remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
-      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw; lastAy = ay_raw; lastAz = az_raw;
+      lastGx = gx_raw;  lastGy = gy_raw;  lastGz = gz_raw;
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
       FUSION_MATH_TYPE dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
       _lastIntegrationTime = nowMicros;
       if (dt <= 0.0) dt = 0.00001;
-      if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      // Numerical guard only - same reasoning as clampSampleDt(), which this
+      // path cannot use wholesale: without a FIFO the loop may poll faster than
+      // the ODR and re-read the same sample, so a dt BELOW nominal is normal
+      // here and must not be rounded up, or that sample gets integrated twice.
+      if (dt > 0.05) dt = 0.05;
       
       gyroIntegration((lastGx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0, 
                       (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
@@ -588,81 +861,72 @@ bool AdvancedTriFusion::update() {
       }
     }
   } else {
-    // === OPRAVA: POUZE VYČTU BUFFER ===
-    #if defined(__AVR__)
-      const int max_packets = 16;
-    #else
-      const int max_packets = 128;
-    #endif
+    // Ask the driver how many packets are waiting BEFORE draining them. That is
+    // the only thing the old two-pass version needed its 3 KB stack buffer for:
+    // perfect_dt is total_dt / packetCount, so the count had to be known up
+    // front. One FIFO_COUNT read supplies it, and the packets can then be
+    // integrated as they stream in - nothing has to be held in RAM.
+    uint16_t pending = _imu->availablePackets();
+    if (pending == 0) return false;
 
-    struct FIFOPacket { float ax, ay, az, gx, gy, gz; };
-    FIFOPacket buffer[max_packets];
-    int packetCount = 0;
+    unsigned long nowMicros = micros();
+    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+    if (total_dt <= 0.0) total_dt = 0.00001;
 
-    while (packetCount < max_packets) {
+    FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)pending;
+
+    int hz = _imu->getODRHz();
+    FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.05;
+    clampSampleDt(perfect_dt, ideal_dt);
+
+    FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
+    FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
+    uint16_t processed = 0;
+
+    for (uint16_t i = 0; i < pending; i++) {
         float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break; 
-        buffer[packetCount].ax = ax_raw; buffer[packetCount].ay = ay_raw; buffer[packetCount].az = az_raw;
-        buffer[packetCount].gx = gx_raw; buffer[packetCount].gy = gy_raw; buffer[packetCount].gz = gz_raw;
-        packetCount++;
+        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break;
+
+        remapAxes(ax_raw, ay_raw, az_raw);
+        remapAxes(gx_raw, gy_raw, gz_raw);
+
+        FUSION_MATH_TYPE ax = ax_raw;
+        FUSION_MATH_TYPE ay = ay_raw;
+        FUSION_MATH_TYPE az = az_raw;
+        FUSION_MATH_TYPE gx = gx_raw;
+        FUSION_MATH_TYPE gy = gy_raw;
+        FUSION_MATH_TYPE gz = gz_raw;
+
+        sumAx += ax; sumAy += ay; sumAz += az;
+        sumGx += gx; sumGy += gy; sumGz += gz;
+
+        gyroIntegration((gx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0,
+                        (gy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0,
+                        (gz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
+        trackUpdateRate();
+        processed++;
     }
-    
-    if (packetCount > 0) {
-      dataProcessed = true;
-      
-      // === OPRAVA: MĚŘENÍ ČASU POUZE KDYŽ MÁME DATA ===
-      unsigned long nowMicros = micros();
-      if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-      FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-      _lastIntegrationTime = nowMicros; // Fix here!
-      
-      if (total_dt <= 0.0) total_dt = 0.00001;
-      FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
 
-      // Bezpečnostní mantinely
-      int hz = _imu->getODRHz();
-      FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.05;
-      if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
-      if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
+    // Only consume the elapsed time if something was actually integrated. If the
+    // drain came up empty the interval belongs to the next call, not to nothing.
+    if (processed == 0) return false;
+    _lastIntegrationTime = nowMicros;
+    dataProcessed = true;
 
-      // Accumulate every packet so lastA*/lastG* can publish the batch mean
-      // instead of only the final sample (see note after the loop).
-      FUSION_MATH_TYPE sumAx = 0, sumAy = 0, sumAz = 0;
-      FUSION_MATH_TYPE sumGx = 0, sumGy = 0, sumGz = 0;
-
-      for(int i = 0; i < packetCount; i++) {
-          float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
-          float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
-
-          remapAxes(ax_raw, ay_raw, az_raw);
-          remapAxes(gx_raw, gy_raw, gz_raw);
-
-          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0];
-          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1];
-          FUSION_MATH_TYPE az = az_raw - accelOffset[2];
-          FUSION_MATH_TYPE gx = gx_raw - gyroOffset[0];
-          FUSION_MATH_TYPE gy = gy_raw - gyroOffset[1];
-          FUSION_MATH_TYPE gz = gz_raw - gyroOffset[2];
-
-          sumAx += ax; sumAy += ay; sumAz += az;
-          sumGx += gx; sumGy += gy; sumGz += gz;
-
-          gyroIntegration((gx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0,
-                          (gy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0,
-                          (gz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
-          trackUpdateRate();
-      }
-
-      // Publish the mean of the whole batch. Previously lastA* was overwritten
-      // every iteration, so getGlobalAcceleration() only ever saw the final
-      // packet - at 8kHz ODR read at 50Hz that discarded ~99% of the samples.
-      // Averaging keeps every sample and low-passes vibration, which also makes
-      // the gravity estimate fed to complementaryCorrection() below steadier.
-      FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)packetCount;
+    // Publish the mean of the whole batch. Previously lastA* was overwritten
+    // every iteration, so getGlobalAcceleration() only ever saw the final
+    // packet - at 8kHz ODR read at 50Hz that discarded ~99% of the samples.
+    // Averaging keeps every sample and low-passes vibration, which also makes
+    // the gravity estimate fed to complementaryCorrection() below steadier.
+    {
+      FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)processed;
       lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
       lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
+    }
 
-      // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
+    // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
+    {
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;

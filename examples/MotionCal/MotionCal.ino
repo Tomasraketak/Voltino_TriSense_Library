@@ -21,8 +21,8 @@ void setup() {
     while (1) delay(10);
   }
 
-  // IMPORTANT: For MotionCal we want the "rawest" data possible.
-  sensor.resetHardwareOffsets();
+  // MotionCal only ever looks at the magnetometer locus, and mag readings never
+  // pass through the IMU's offset/scale registers - so nothing needs clearing here.
 }
 
 void loop() {
