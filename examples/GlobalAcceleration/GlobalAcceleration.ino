@@ -1,5 +1,5 @@
 /*
- * Example: GlobalAcceleration.ino (Updated for v1.3.0)
+ * Example: GlobalAcceleration.ino
  *
  * Description:
  * Extracts pure Global Acceleration (World Frame Acceleration)
@@ -22,7 +22,11 @@ TriSense sensor;
 AdvancedTriFusion fusion(&sensor.imu, &sensor.mag);
 
 unsigned long lastPrint = 0;
-const unsigned long printInterval = 50000; // 20Hz output
+// 10 Hz is plenty for a human to read, and it matters more than it looks: a
+// ~190-character line takes about 17 ms to clear at 115200 baud, while the FIFO
+// fills in 12.8 ms at 8 kHz. Printing every 50 ms overruns it on its own - see
+// docs/GUIDE.md, "Writing a loop that keeps up".
+const unsigned long printInterval = 100000; // 10Hz Serial output
 
 void setup() {
   Serial.begin(115200);
@@ -81,9 +85,16 @@ void loop() {
       // gone for good, so any integration across this interval has a permanent
       // error. If you see this, lower the ODR or speed up the loop (a blocking
       // Serial.print at a low baud rate is the usual culprit).
+      // Two different numbers, and only the second is a quantity:
+      //   getFIFOOverflowCount() counts EVENTS - times the FIFO was found full.
+      //   getLostPacketCount()   is the sensor's OWN tally of discarded packets.
+      // A full FIFO the loop still drains in time loses nothing, so a high event
+      // count next to zero lost packets means the data is intact.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print("  !! FIFO FULL (events ");
         Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(", packets lost ");
+        Serial.print(sensor.imu.getLostPacketCount());
         Serial.print(")");
       }
       Serial.println();

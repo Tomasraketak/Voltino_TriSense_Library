@@ -1,5 +1,5 @@
 /*
- * Example: IMUcalibration.ino (Updated for v1.2.0)
+ * Example: IMUcalibration.ino
  * This tool is used for calibrating sensors on the Voltino TriSense board.
  * * INSTRUCTIONS:
  * 1. Open Serial Monitor (115200 baud).
