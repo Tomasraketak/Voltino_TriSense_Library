@@ -1,5 +1,5 @@
 /*
- * Example: CustomPins.ino (Voltino TriSense v1.3.0)
+ * Example: CustomPins.ino
  *
  * Description:
  * Shows how to route the ICM-42688-P (SPI) and the AK09918C / BMP580 (I2C)
@@ -144,7 +144,9 @@ void setup() {
 void loop() {
   if (fusion.update()) {
     unsigned long now = millis();
-    if (now - lastPrintTime >= 50) { // 20Hz output
+    // 10 Hz, not 20: a long line at 115200 baud takes ~17 ms to clear while the
+    // FIFO fills in 12.8 ms at 8 kHz, so faster output overruns it by itself.
+    if (now - lastPrintTime >= 100) { // 10Hz output
       lastPrintTime = now;
 
       float roll, pitch, yaw;
@@ -178,9 +180,16 @@ void loop() {
       Serial.print(" | FusionHz:"); Serial.print(fusion.getActualFusionHz(), 1);
 
       // Dropped FIFO packets are unrecoverable lost rotation - surface them.
+      // Two different numbers, and only the second is a quantity:
+      //   getFIFOOverflowCount() counts EVENTS - times the FIFO was found full.
+      //   getLostPacketCount()   is the sensor's OWN tally of discarded packets.
+      // A full FIFO the loop still drains in time loses nothing, so a high event
+      // count next to zero lost packets means the data is intact.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO OVERFLOW (total ");
+        Serial.print("  !! FIFO FULL (events ");
         Serial.print(sensor.imu.getFIFOOverflowCount());
+        Serial.print(", packets lost ");
+        Serial.print(sensor.imu.getLostPacketCount());
         Serial.print(")");
       }
       Serial.println();
