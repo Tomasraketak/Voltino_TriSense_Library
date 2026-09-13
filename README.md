@@ -110,6 +110,13 @@ This keeps quaternion integration correct under CPU load and bus contention with
 
 ---
 
+## 📖 Practical Guide
+
+The [**Practical Guide**](docs/GUIDE.md) walks through wiring, choosing an ODR
+and FIFO mode, writing a loop that keeps up at high rates, the full calibration
+sequence, and troubleshooting. Start there if you are new to the module; the
+API reference below is the lookup table for when you already know what you want.
+
 ## Installation
 
 1.  Download the latest release `.zip` file from the GitHub repository.
