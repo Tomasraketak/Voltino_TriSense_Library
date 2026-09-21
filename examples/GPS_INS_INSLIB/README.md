@@ -132,10 +132,32 @@ needed, which is just as well, because a sketch cannot add one.
 
 ## The stack budget, which is the whole design constraint
 
-arduino-pico gives a core **8192 bytes** of stack. Measured with INSLIB's own
-call-graph stack analysis, against the exact toolchain and flags arduino-pico
-uses for a Pico 2 (its arm-none-eabi-gcc 16.1.0, cortex-m33,
-`armv8-m.main+fp+dsp`, `-Os`):
+arduino-pico gives a core **8192 bytes** of stack — and that is not a shortage
+of memory. The RP2350 has 520 KB of SRAM and this sketch leaves 463 KB of it
+unused; 8 KB is where the stack *sits*. The linker script puts both cores'
+stacks in `SCRATCH_X` and `SCRATCH_Y`, two separate 4 KB SRAM banks that live
+*above* the main 512 KB region:
+
+```
+0x20000000  RAM         512 KB   .data / .bss / heap   <- the 463 KB that is free
+0x20080000  SCRATCH_X     4 KB   core 1 stack
+0x20081000  SCRATCH_Y     4 KB   core 0 stack
+```
+
+A bank of its own is what keeps a core's stack accesses off the bus the other
+core and DMA are using — exactly what you want for a stack. The cost is that it
+grows down inside a fixed 8 KB window, with the free SRAM in a different region
+entirely, so running past the bottom is not an out-of-memory error that stops
+anything. It is a silent write into whatever is below: with the default split,
+the other core's live stack.
+
+(Same arrangement on every RP2350 board — a XIAO RP2350 has the identical 520 KB
+of SRAM and the identical two 4 KB banks. The 2 MB or 4 MB on the module is
+QSPI **flash**, where the program lives, and this sketch uses 3% of it.)
+
+Measured with INSLIB's own call-graph stack analysis, against the exact
+toolchain and flags arduino-pico uses for a Pico 2 (its arm-none-eabi-gcc
+16.1.0, cortex-m33, `armv8-m.main+fp+dsp`, `-Os`):
 
 | configuration | `nav_suite_update()` needs | fits in 8192 B? |
 |---|---:|---|
@@ -166,6 +188,13 @@ And the telemetry line reports the real margin, every second, from
 ```
 
 If that ever drops near the second number, the sketch says so loudly and once.
+
+If you ever do need more than 8 KB — 18 states, say — the way out is not
+`src/inslib_config.h`: build against arduino-pico's FreeRTOS variant and run the
+filter in a task with an explicit stack size, which can be as large as the free
+SRAM allows. `core1_separate_stack` is already the same trick done by the core
+(it `malloc`s core 1's stack), but its 8 KB is hard-coded in arduino-pico's
+`main.cpp` and cannot be changed from a sketch.
 
 **15 states is not a compromise.** It is the full INS state vector: position,
 velocity, attitude, accelerometer bias, gyroscope bias. The only thing dropped

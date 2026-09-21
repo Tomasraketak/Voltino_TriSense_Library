@@ -440,7 +440,9 @@ A 15-state error-state Kalman filter carries position, velocity, attitude and bo
 
 ### The stack budget is the design
 
-arduino-pico gives a core 8192 bytes of stack, and it halves that the moment a sketch defines `loop1()`. Measured with INSLIB's own call-graph analysis against the exact toolchain arduino-pico ships for a Pico 2:
+arduino-pico gives a core 8192 bytes of stack, and it halves that the moment a sketch defines `loop1()`. That is not a shortage of memory — the RP2350 has 520 KB of SRAM and the sketch leaves 463 KB free — it is *where the stack sits*: the linker puts both cores' stacks in `SCRATCH_X`/`SCRATCH_Y`, two separate 4 KB SRAM banks above the main 512 KB region, so a core's stack accesses stay off the bus the other core and DMA use. Growing past the bottom of that window is not an out-of-memory error, it is a silent write into the other core's stack. (The 2–4 MB on a Pico 2 or XIAO RP2350 is QSPI *flash*, where the program lives; this sketch uses 3% of it.)
+
+Measured with INSLIB's own call-graph analysis against the exact toolchain arduino-pico ships for a Pico 2:
 
 | configuration | `nav_suite_update()` needs | fits? |
 |---|---:|---|

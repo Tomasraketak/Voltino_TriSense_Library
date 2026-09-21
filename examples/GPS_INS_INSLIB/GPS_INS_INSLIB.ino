@@ -118,7 +118,7 @@
 // building for, so every board in it, Pico 2 included, gets
 // -DARDUINO_ARCH_RP2040.
 #if !defined(PICO_RP2350)
-  #error "GPS_INS_INSLIB targets the RP2350 (Raspberry Pi Pico 2) on the Earle Philhower arduino-pico core. The RP2040 has no FPU and cannot give one core the 8 KB of stack this filter needs - use examples/GPS_INS_Localization there."
+  #error "GPS_INS_INSLIB targets the RP2350 (Raspberry Pi Pico 2) on the Earle Philhower arduino-pico core. The RP2040 has the same 8 KB of stack but no FPU, so this filter's float arithmetic would run in software - use examples/GPS_INS_Localization there."
 #endif
 #if !defined(__ARM_FP)
   #error "Select the ARM (Cortex-M33) architecture for this board, not RISC-V: the Hazard3 cores have no FPU, and INSLIB's float arithmetic would run in software."

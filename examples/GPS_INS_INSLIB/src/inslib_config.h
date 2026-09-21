@@ -31,10 +31,25 @@
  * (-O2 moves the first figure by 24 bytes, so whichever optimization level you
  * pick in the Tools menu, the conclusion is the same.)
  *
- * A core on arduino-pico has 8192 bytes of stack. So 15 states fits with about
- * 1.4 KB to spare, 18 states does not fit at all, and leaving KFCore at its
- * defaults overflows inside the first Kalman prediction - which on a Cortex-M
- * is not a crash but silent corruption of whatever sits below the stack.
+ * A core on arduino-pico has 8192 bytes of stack, and that is not a shortage of
+ * memory - the RP2350 has 520 KB of SRAM and this sketch leaves 463 KB of it
+ * unused. It is where the stack SITS. The linker script puts both cores' stacks
+ * in SCRATCH_X and SCRATCH_Y, two separate 4 KB SRAM banks above the main
+ * 512 KB region (0x20080000 and 0x20081000), because a bank of its own is what
+ * keeps a core's stack accesses off the bus the other core and DMA are using.
+ * The stack therefore grows down inside a fixed 8 KB window with the free
+ * 463 KB in a different region entirely, and running past the bottom is not an
+ * out-of-memory error that stops anything.
+ *
+ * So 15 states fits with about 1.4 KB to spare, 18 states does not fit at all,
+ * and leaving KFCore at its defaults overflows inside the first Kalman
+ * prediction - which on a Cortex-M is not a crash but silent corruption of
+ * whatever sits below the stack (with the default split, that is the other
+ * core's live stack).
+ *
+ * If you ever do need more than 8 KB, the way out is not this header: build
+ * against arduino-pico's FreeRTOS variant and run the filter in a task with an
+ * explicit stack size, which can be as large as the free SRAM allows.
  *
  * That last line is the one worth staring at: KFCore's defaults are not
  * pathological, they are simply sized for a desktop. Nothing warns you.
