@@ -1,5 +1,5 @@
 /*
- * Example: RawDataI2C.ino (Updated for v1.3.0)
+ * Example: RawDataI2C.ino
  *
  * Description:
  * Example of reading raw physical data (without extra calibration)

@@ -1,5 +1,5 @@
 /*
- * Example: GPS_INS_Localization.ino  (Voltino TriSense v1.3.0)
+ * Example: GPS_INS_Localization.ino
  *
  * Full 3D localization: fuses the TriSense IMU + magnetometer + barometer with a
  * Quectel L76K GNSS receiver into a single navigation solution that outputs
@@ -349,6 +349,7 @@ struct NavOut {
   float    hdop;
   uint32_t fixAgeMs;
   uint32_t fifoOverflows;
+  uint32_t fifoLostPackets;   // Sensor's own tally - the actual loss
   bool     originSet;
   bool     gpsAiding;
   bool     zupt;
@@ -734,6 +735,7 @@ static void publishNav(float roll, float pitch, float yaw,
   n.fusionHz      = fusion.getActualFusionHz();
   n.baroOffset    = baroOffset;
   n.fifoOverflows = sensor.imu.getFIFOOverflowCount();
+  n.fifoLostPackets = sensor.imu.getLostPacketCount();
   n.originSet     = originSet;
   n.gpsAiding     = originSet && ((uint32_t)(nowMs - lastGpsUseMs) < 3000);
   n.zupt          = zuptActive;
@@ -1147,9 +1149,13 @@ static void printTelemetry(const NavOut &n) {
   Serial.print(F(" | "));     Serial.print(navModeName(n));
   Serial.print(' ');          Serial.print(n.fusionHz, 0); Serial.print(F("Hz"));
 
+  // "events" is how often the FIFO was found full; "lost" is what the sensor
+  // says it actually discarded. A full FIFO the loop still drains costs nothing.
   if (n.fifoOverflows) {
-    Serial.print(F("  !! IMU FIFO OVERFLOW x"));
+    Serial.print(F("  !! IMU FIFO FULL x"));
     Serial.print(n.fifoOverflows);
+    Serial.print(F(" lost "));
+    Serial.print(n.fifoLostPackets);
   }
   Serial.println();
 

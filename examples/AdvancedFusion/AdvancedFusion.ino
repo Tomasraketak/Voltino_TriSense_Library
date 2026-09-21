@@ -1,5 +1,5 @@
 /*
- * Example: AdvancedFusion.ino (Updated for v1.3.0)
+ * Example: AdvancedFusion.ino
  * Advanced sensor fusion (Complementary Filter with Gaussian confidence)
  * Features dynamic FIFO draining and an MCU-clocked adaptive timebase.
  * * HW: Raspberry Pi Pico 2 / ESP32 + Voltino TriSense
@@ -11,7 +11,11 @@ TriSense sensor;
 AdvancedTriFusion fusion(&sensor.imu, &sensor.mag);
 
 unsigned long lastPrint = 0;
-const unsigned long printInterval = 50000; // 20Hz Serial output
+// 10 Hz is plenty for a human to read, and it matters more than it looks: a
+// ~190-character line takes about 17 ms to clear at 115200 baud, while the FIFO
+// fills in 12.8 ms at 8 kHz. Printing every 50 ms overruns it on its own - see
+// docs/GUIDE.md, "Writing a loop that keeps up".
+const unsigned long printInterval = 100000; // 10Hz Serial output
 
 void setup() {
   Serial.begin(115200);

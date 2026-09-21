@@ -1,5 +1,5 @@
 /*
- * Example: MotionCal.ino (Updated for v1.2.0)
+ * Example: MotionCal.ino
  * Sends raw sensor data from Voltino TriSense to the MotionCal application.
  * DOWNLOAD MOTIONCAL: https://www.pjrc.com/store/prop_shield.html
  */

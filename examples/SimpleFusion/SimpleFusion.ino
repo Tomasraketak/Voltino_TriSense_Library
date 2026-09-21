@@ -1,5 +1,5 @@
 /*
- * Example: SimpleFusion.ino (Updated for v1.2.0)
+ * Example: SimpleFusion.ino
  * Demonstration of simple sensor fusion.
  */
 
@@ -9,7 +9,11 @@ TriSense sensor;
 SimpleTriFusion fusion(&sensor.imu, &sensor.mag);
 
 unsigned long lastPrint = 0;
-const unsigned long printInterval = 50000; // 20Hz output
+// 10 Hz is plenty for a human to read, and it matters more than it looks: a
+// ~190-character line takes about 17 ms to clear at 115200 baud, while the FIFO
+// fills in 12.8 ms at 8 kHz. Printing every 50 ms overruns it on its own - see
+// docs/GUIDE.md, "Writing a loop that keeps up".
+const unsigned long printInterval = 100000; // 10Hz Serial output
 
 void setup() {
   Serial.begin(115200);
@@ -27,6 +31,11 @@ void setup() {
   Serial.println("Calibrating Gyro... Keep still!");
   sensor.autoCalibrateGyro(500); 
 
+  // NOTE: SimpleTriFusion integrates the gyro only - it never reads the
+  // magnetometer in update(), so yaw WILL drift and these values do not correct
+  // it. They still matter, because initOrientation() below uses the
+  // magnetometer once to seed the starting heading. For a heading that stays
+  // referenced to north, use AdvancedTriFusion.
   fusion.setMagHardIron(-46.02, -0.85, -46.00);
   float softIron[3][3] = {
     {0.965, 0.008, -0.002},
