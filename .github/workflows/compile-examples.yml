@@ -18,6 +18,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # GPS_INS_INSLIB builds against INSLIB, which lives in another repository and
+  # is fetched at build time (it is AGPL-3.0, this library is MIT - see that
+  # example's README). Pinned rather than tracking main, so an upstream change
+  # cannot turn an unrelated pull request red. Bumping this tag IS how you
+  # verify the example against a new INSLIB release.
+  INSLIB_REF: v1.1.0
+
 jobs:
   compile:
     name: ${{ matrix.board.name }}
@@ -36,10 +44,17 @@ jobs:
             libraries: |
               - source-path: ./
               - name: TinyGPSPlus
+            # The only board GPS_INS_INSLIB targets, so the only job that needs
+            # INSLIB fetched first.
+            fetch-inslib: true
             sketch-paths: examples
 
           # RP2040 has no FPU, so this is the one that exercises the bit-trick
           # invSqrt path on a 32-bit core.
+          #
+          # Sketches are listed rather than globbed here because GPS_INS_INSLIB
+          # is RP2350-only by design and #errors out on a core without an FPU
+          # and with only 4 KB of stack per core to give its filter.
           - name: Raspberry Pi Pico (RP2040)
             fqbn: rp2040:rp2040:rpipico
             platforms: |
@@ -48,7 +63,15 @@ jobs:
             libraries: |
               - source-path: ./
               - name: TinyGPSPlus
-            sketch-paths: examples
+            sketch-paths: |
+              examples/AdvancedFusion
+              examples/CustomPins
+              examples/GPS_INS_Localization
+              examples/GlobalAcceleration
+              examples/IMUcalibration
+              examples/MotionCal
+              examples/RawDataI2C
+              examples/SimpleFusion
 
           - name: ESP32
             fqbn: esp32:esp32:esp32
@@ -100,6 +123,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # GPS_INS_INSLIB ships no INSLIB source of its own: the script clones
+      # INSLIB (plus the KFCore submodule it pins) into the sketch and generates
+      # the translation-unit wrappers that carry the build configuration. Doing
+      # it here means CI compiles the example exactly the way a user does.
+      - name: Fetch INSLIB
+        if: matrix.board.fetch-inslib
+        run: ./fetch_inslib.sh
+        working-directory: examples/GPS_INS_INSLIB
+        env:
+          INSLIB_REF: ${{ env.INSLIB_REF }}
 
       - name: Compile
         uses: arduino/compile-sketches@v1

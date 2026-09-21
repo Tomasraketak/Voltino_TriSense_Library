@@ -373,7 +373,7 @@ The `GPS_INS_Localization` example does exactly that on a **Raspberry Pi Pico 2 
 | **Attitude** | `AdvancedTriFusion` (adaptive complementary filter) | IMU ODR | gyro, accel, mag |
 | **Navigation** | Linear Kalman filter, `x = [position, velocity, accel-bias]` per axis | 240 Hz | world-frame accel, GPS position, GPS velocity, baro altitude, ZUPT |
 
-**Why not a 15-state ESKF?** An error-state Kalman filter is the textbook answer and genuinely wins in one regime: long GNSS outages under high dynamics, where the filter must recover *heading* from GPS. It also costs a 15×15 covariance propagation every step. Here the magnetometer already observes heading and the accelerometer already observes tilt, so that coupling buys very little — while the cascade costs a small fraction of the arithmetic and is far easier to tune. Fly a fast fixed-wing with no usable magnetometer and you should upgrade; for rovers, boats, cars, drones and trackers the cascade is the better trade.
+**Why not a 15-state ESKF?** An error-state Kalman filter is the textbook answer and genuinely wins in one regime: long GNSS outages under high dynamics, where the filter must recover *heading* from GPS. It also costs a 15×15 covariance propagation every step. Here the magnetometer already observes heading and the accelerometer already observes tilt, so that coupling buys very little — while the cascade costs a small fraction of the arithmetic and is far easier to tune. Fly a fast fixed-wing with no usable magnetometer and you should upgrade — [`examples/GPS_INS_INSLIB`](examples/GPS_INS_INSLIB) is that upgrade, the same hardware driven by a real 15-state ESKF. For rovers, boats, cars, drones and trackers the cascade is the better trade.
 
 **Why a Kalman filter for navigation and not another complementary filter?** GPS accuracy varies by an order of magnitude with HDOP, and the accelerometer bias must be *estimated*, not assumed. A Kalman filter weights each measurement by its actual variance and makes the bias observable. A fixed-gain filter can do neither.
 
@@ -412,6 +412,60 @@ Outlier fixes are rejected by a `GATE_SIGMA` innovation gate; `GPS_MAX_REJECTS` 
 ### Runtime keys
 
 `d` raw NMEA · `v` CSV output · `z` reset the navigation filter · `r` 10 Hz GNSS · `s` 1 Hz GNSS · `h` help
+
+---
+
+## GPS / INS Localization with a 15-state ESKF (`examples/GPS_INS_INSLIB`)
+
+The same hardware as above — TriSense plus a Quectel L76K on a Pico 2 — with the estimation handed to [**INSLIB**](https://github.com/jnz/INSLIB), a portable C navigation-filter library by Jan Zwiener. This is the upgrade path the cascade's own documentation points at.
+
+> **📖 Full documentation:** [`examples/GPS_INS_INSLIB/README.md`](examples/GPS_INS_INSLIB/README.md) — setup, the stack budget, frames, the GNSS entry gate, telemetry and tuning.
+
+> **⚠️ INSLIB is AGPL-3.0; this library is MIT.** No INSLIB source is committed here — `fetch_inslib.sh` downloads it at build time — but the firmware you flash is a combined work and the AGPL covers it, network-use clause included. For a closed product, take a commercial licence from INSLIB's author or stay on `GPS_INS_Localization`, which is MIT throughout. KFCore, INSLIB's Kalman backend, is BSD-3-Clause.
+
+**The library is not modified.** TriSense drives the sensors, calibrates them and hands over physical units; everything that bridges to INSLIB is sketch code.
+
+### What the extra states buy
+
+A 15-state error-state Kalman filter carries position, velocity, attitude and both IMU biases in **one** covariance, so the correlations the cascade discards are exactly what it works with:
+
+| | Cascade (`GPS_INS_Localization`) | ESKF (`GPS_INS_INSLIB`) |
+|---|---|---|
+| Heading source | magnetometer only | magnetometer **and** motion — accelerate in a straight line and the filter finds it with no magnetometer at all |
+| Gyro bias | one number measured at boot | an estimated state that follows temperature |
+| GNSS latency | position extrapolated forward with the filter's own velocity | correction anchored in the filter's state history where it belongs |
+| Outage behaviour | degrades without saying so | named modes: `FULL` / `COASTING` / `ATTITUDE_ONLY`, with a parallel AHRS and barometric vertical channel |
+| Declination | you enter it | derived from the first fix via a built-in World Magnetic Model |
+| Cost | ~a tenth of the arithmetic | 143 KB flash, 61 KB RAM, **6.8 KB of stack** |
+
+### The stack budget is the design
+
+arduino-pico gives a core 8192 bytes of stack, and it halves that the moment a sketch defines `loop1()`. That is not a shortage of memory — the RP2350 has 520 KB of SRAM and the sketch leaves 463 KB free — it is *where the stack sits*: the linker puts both cores' stacks in `SCRATCH_X`/`SCRATCH_Y`, two separate 4 KB SRAM banks above the main 512 KB region, so a core's stack accesses stay off the bus the other core and DMA use. Growing past the bottom of that window is not an out-of-memory error, it is a silent write into the other core's stack. (The 2–4 MB on a Pico 2 or XIAO RP2350 is QSPI *flash*, where the program lives; this sketch uses 3% of it.)
+
+Measured with INSLIB's own call-graph analysis against the exact toolchain arduino-pico ships for a Pico 2:
+
+| configuration | `nav_suite_update()` needs | fits? |
+|---|---:|---|
+| 15 states, KFCore sized to match — **what the example uses** | 6776 B | yes, ~1.4 KB spare |
+| 18 states (optional mag-bias estimator) | 8528 B | no |
+| 15 states, KFCore left at its defaults | 12880 B | no, by 50% |
+
+So the example sets `bool core1_separate_stack = true;` to get a full 8 KB on each core, sizes INSLIB and KFCore in `src/inslib_config.h`, and prints the real margin from `rp2040.getFreeStack()` in every telemetry line. On a Cortex-M the alternative is not a crash — it is silent corruption of whatever sits below the stack.
+
+Because the Arduino build has no way to pass `-D` to a sketch, the INSLIB sources land in a folder Arduino copies but does not compile, and each is pulled into its own one-line translation unit under `src/` that includes the config header first. That is what `-D` would have done, without patching a line of INSLIB.
+
+### Setup
+
+```sh
+cd examples/GPS_INS_INSLIB
+./fetch_inslib.sh          # or: INSLIB_REF=v1.1.0 ./fetch_inslib.sh
+```
+
+Then build the sketch normally. Needs the **ARM** (not RISC-V) architecture on a Pico 2 — the Hazard3 cores have no FPU — plus TinyGPSPlus and `git`.
+
+### Runtime keys
+
+`c` CSV output · `n` raw NMEA · `h` help
 
 ---
 
