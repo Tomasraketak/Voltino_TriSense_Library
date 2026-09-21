@@ -1,0 +1,4 @@
+# Everything fetch_inslib.sh produces. INSLIB is AGPL-3.0 and this library is
+# MIT, so no INSLIB source is tracked here - it is downloaded at build time.
+/inslib/
+/src/inslib_tu_*.c
