@@ -121,16 +121,11 @@ jobs:
       # Checks library.properties, the folder layout and the rest of the Arduino
       # library specification.
       #
-      # library-manager is deliberately off. The `update` mode asks "is this an
-      # already-indexed library whose metadata still matches the index?", and
-      # since Voltino TriSense has never been submitted to the Library Manager
-      # index, rule LP018 fails by definition ("Library name not found in the
-      # Library Manager index") - a publication status, not a defect in the code.
-      # Switch this to `submit` when you actually want to publish; it then checks
-      # readiness for submission instead. Expect it to want two things first:
-      # a header named after the library (LS008 - a one-line Voltino_TriSense.h
-      # that includes TriSense.h satisfies it without touching any sketch) and a
-      # name without spaces (LP015).
+      # library-manager: submit checks readiness for submission to the Arduino
+      # Library Manager index (name uniqueness, URL, header named after the
+      # library, ...). Once the library is indexed, switch to `update` so
+      # releases are checked against the index metadata.
       - uses: arduino/arduino-lint-action@v1
         with:
-          library-manager: false
+          library-manager: submit
+          compliance: strict
