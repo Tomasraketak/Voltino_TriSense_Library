@@ -515,12 +515,11 @@ The hardware FIFO is 2 KB — **128 packets** at 16 bytes, or **102** at 20 byte
 
 Worse, it hides. The per-sample `dt` is computed as *elapsed time ÷ packets actually read*, so if 160 samples were produced but only 128 were read, the timing still looks perfectly consistent while a quarter of the motion has vanished.
 
-Two independent detectors run on every buffer refill, and either one raises the flag:
+On every buffer refill the driver checks the FIFO count: a count within two packets of the 2 KB capacity means the FIFO hit its limit, and the overflow flag is raised. In Stream mode a FIFO that filled up stays full until it is read, so no overflow can slip past this check. It needs no interrupt configuration.
 
-1. The hardware's latched `FIFO_FULL` bit in `INT_STATUS`. `setFIFOMode()` enables `FIFO_FULL_INT1_EN` in `INT_SOURCE0` so the bit actually latches — the status bit does **not** latch for a disabled source, so without that write this detector reports nothing. (It also makes the INT1 pin pulse on FIFO full, harmless when the pin is unused.)
-2. A config-free backstop: a FIFO count within one packet of the 2 KB capacity means the buffer is saturated. This needs no interrupt configuration and keeps working even if a sketch overwrites `INT_SOURCE0`.
+The hardware `FIFO_FULL` bit in `INT_STATUS` is **not** used. On a real module (XIAO RP2350, HiRes, 8 kHz) it read as set on almost every refill while the FIFO held one or two packets and every sample arrived, so it reported overflows that never happened. The driver does not read `INT_STATUS` at all, and leaves `INT_SOURCE0` alone.
 
-Because detector 2 fires at saturation, it can flag one sample before the first packet is actually lost — treat the warning as "the FIFO hit its limit", which is the actionable condition either way.
+When the flag is raised, the driver also reads the chip's own lost-packet counter (`FIFO_LOST_PKT`), which `getLostPacketCount()` accumulates.
 
 **The library never prints anything** — poll it from your sketch:
 
@@ -532,8 +531,6 @@ if (sensor.imu.fifoOverflowed()) {                  // self-clearing since last 
 ```
 
 The usual cause is a blocking `Serial.print` at a low baud rate. If you see overflows, raise the baud rate (921600), log binary, or lower the ODR.
-
-> `INT_STATUS` is read-to-clear, and the driver reads it once per FIFO refill. If your sketch also drives the INT pins and inspects `INT_STATUS` itself, the driver will have consumed the flags first.
 
 ---
 

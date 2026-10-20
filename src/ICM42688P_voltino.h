@@ -294,12 +294,11 @@ public:
   // --- FIFO overflow monitoring ---
   // The hardware FIFO holds 2 KB. If the sketch does not drain it fast enough
   // the sensor discards new samples, and dropped packets are rotation that can
-  // never be integrated - a permanent attitude error. The driver latches the
-  // hardware FIFO_FULL flag on every buffer refill and counts the events.
+  // never be integrated - a permanent attitude error. On every buffer refill
+  // the driver checks the FIFO count and counts the refills that found it
+  // full (within two packets of capacity). The hardware FIFO_FULL bit in
+  // INT_STATUS is not used - see fillFIFOBuffer() - and INT_STATUS is not read.
   // NOTHING is printed from the library: poll these from your sketch instead.
-  // Note: this reads INT_STATUS once per FIFO refill, and that register is
-  // read-to-clear - so if your sketch also drives the INT pins and inspects
-  // INT_STATUS itself, expect the driver to have consumed the flags first.
   // NOTE ON THE COUNT: this counts EVENTS - refills that found the FIFO full -
   // not lost samples. One stalled loop produces one event but may lose hundreds
   // of packets; a FIFO that merely sits full produces an event per refill while

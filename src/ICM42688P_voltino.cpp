@@ -835,16 +835,6 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
     intf &= (uint8_t)~ICM42688_BIT_FIFO_COUNT_REC;   // 0 = count in bytes
     intf |= ICM42688_BIT_FIFO_COUNT_ENDIAN;          // 1 = big endian
     writeRegister(ICM42688_REG_INTF_CONFIG0, intf);
-
-    // Enable the FIFO_FULL condition so it latches in INT_STATUS and overflow
-    // becomes detectable. Read-modify-write leaves the data-ready routing alone.
-    // This also makes the INT1 pin pulse on FIFO full, which is harmless when
-    // the pin is unused.
-    //
-    // Bit 1 in both registers: FIFO_FULL_INT1_EN here lines up with
-    // FIFO_FULL_INT in INT_STATUS. FIFO_THS is bit 2 in both.
-    uint8_t intSource = readRegister(ICM42688_REG_INT_SOURCE0);
-    writeRegister(ICM42688_REG_INT_SOURCE0, intSource | ICM42688_INT_SOURCE0_FIFO_FULL);
   }
 
   enforceBandwidthLimit();
@@ -945,15 +935,6 @@ uint8_t ICM42688P::fillFIFOBuffer() {
 
   if (_fifoPacketSize == 0) return 0; // Guard against a divide-by-zero
 
-  bool overflow = false;
-
-  // Detector 1: the hardware's latched FIFO_FULL flag. INT_STATUS is
-  // read-to-clear, so it is checked once per burst rather than once per packet.
-  // This only reports anything because setFIFOMode() enables FIFO_FULL in
-  // INT_SOURCE0 - the status bit does not latch for a disabled source.
-  uint8_t intStatus = readRegister(ICM42688_REG_INT_STATUS);
-  if (intStatus & ICM42688_INT_STATUS_FIFO_FULL) overflow = true;
-
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
   uint16_t fifoBytes = ((uint16_t)countBuf[0] << 8) | countBuf[1];
@@ -961,33 +942,47 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   // A count beyond what the part can physically report means a garbled read.
   if (fifoBytes > ICM42688_FIFO_COUNT_MAX) return 0;
 
-  // Detector 2: config-free backstop. A count within one packet of the 2 KB
-  // capacity means the FIFO is saturated, so samples are being dropped (or are
-  // about to be). This needs no interrupt configuration at all, and therefore
-  // still works if INT_SOURCE0 is overwritten by the sketch.
-  if ((uint32_t)fifoBytes + _fifoPacketSize > ICM42688_FIFO_BYTES) overflow = true;
+  // Overflow detection rests on the FIFO count alone. In Stream mode a FIFO
+  // that filled up stays full until it is read - only these reads drain it -
+  // so every overflow is still visible here, at the next refill, as a count
+  // within two packets of the 2 KB capacity (one packet is reserved by the
+  // chip, and the read cache can add one or two; datasheet 6.3).
+  //
+  // The hardware FIFO_FULL bit in INT_STATUS is deliberately NOT used. On a
+  // real module at 8 kHz in HiRes mode it read as set on almost every refill
+  // while the FIFO held one or two packets and every sample arrived (fusion
+  // rate == ODR), so it reported overflows that did not happen.
+  const bool overflow =
+      (uint32_t)fifoBytes + 2u * _fifoPacketSize >= ICM42688_FIFO_BYTES;
 
   if (overflow) {
     _fifoOverflowFlag = true;
     if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
 
-    // Both detectors above answer "is the FIFO full", which is not the same
-    // question as "did we lose anything" - a FIFO sitting full loses nothing so
-    // long as the drain keeps pace, and a single stalled loop loses hundreds of
-    // packets while raising one flag. The part keeps the real figure itself, so
-    // read it rather than inferring one. Polled only on an overflow event to
-    // keep two register reads out of the normal path.
+    // A full FIFO is not the same as lost data: a FIFO sitting full loses
+    // nothing as long as the drain keeps pace, and one stalled loop loses
+    // hundreds of packets while raising one flag. The part keeps its own
+    // tally, so read that - only here, to keep two register reads out of the
+    // normal path.
+    //
+    // Byte order: the datasheet's register description puts the LOW byte at
+    // 0x6C; its register map table says the opposite. This follows the
+    // description. If the lost count only ever moves in steps of 256, it is
+    // the other way round.
     uint8_t lost[2];
     readRegisters(ICM42688_REG_FIFO_LOST_PKT0, lost, 2);
     const uint16_t raw = (uint16_t)lost[0] | ((uint16_t)lost[1] << 8);
 
     if (!_lostPacketPrimed) {
       _lostPacketPrimed = true;
+    } else if (raw >= _lostPacketLastRaw) {
+      _lostPacketTotal += (uint32_t)(raw - _lostPacketLastRaw);
     } else {
-      // Unsigned subtraction, so a wrap of the 16-bit register still yields the
-      // right increment as long as fewer than 65536 packets were lost between
-      // two overflow events.
-      _lostPacketTotal += (uint32_t)(uint16_t)(raw - _lostPacketLastRaw);
+      // The counter went DOWN. That is a reset (FIFO flush, re-configuration,
+      // or a counter that clears itself), not a wrap: a 16-bit wrap would need
+      // 65536 lost packets between two refills. Treating it as a wrap - as an
+      // earlier version did - added ~65536 phantom packets every time.
+      _lostPacketTotal += raw;
     }
     _lostPacketLastRaw = raw;
   }
