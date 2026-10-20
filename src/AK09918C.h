@@ -43,7 +43,7 @@ enum AK09918_Mode {
 
 class AK09918C {
 public:
-  AK09918C();
+  constexpr AK09918C() {}   // initial values are in the class, see below
 
   // Standalone initialization matching Voltino conventions. 
   // Automatically handles bus init. Supports custom pins for ESP32/8266.
@@ -89,8 +89,8 @@ public:
   bool overflow = false; 
 
 private:
-  TwoWire* _wire;
-  uint8_t _currentMode;
+  TwoWire* _wire = &Wire;
+  uint8_t _currentMode = ODR_100HZ;
   
   // Sensitivity constant for float multiplication (0.15 uT/LSB according to datasheet)
   static constexpr float MAG_SCALE = 0.15f;

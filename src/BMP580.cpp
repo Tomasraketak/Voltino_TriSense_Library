@@ -7,10 +7,6 @@
 #define DEFAULT_MODE BMP580_MODE_NORMAL
 #define DEFAULT_IIR BMP580_IIR_OFF
 
-BMP580::BMP580() {
-  _wire = &Wire;
-  _i2cAddr = BMP580_PRIMARY_I2C_ADDR;
-}
 
 bool BMP580::begin(uint8_t addr, TwoWire &wire) {
   _wire = &wire;

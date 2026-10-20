@@ -91,7 +91,7 @@ enum BMP580_Mode {
 
 class BMP580 {
  public:
-  BMP580();
+  constexpr BMP580() {}     // initial values are in the class, see below
   // `wire` selects the I2C bus. The TriSense module keeps all of its sensors on
   // one bus, so this is normally whatever TriSense::beginAll() was given.
   bool begin(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);
@@ -123,8 +123,8 @@ class BMP580 {
   float readAltitude(float seaLevelPressure = 101325.0f);
 
  private:
-  TwoWire* _wire;
-  uint8_t _i2cAddr;
+  TwoWire* _wire = &Wire;
+  uint8_t _i2cAddr = BMP580_PRIMARY_I2C_ADDR;
   
   // Smart caching variables
   float _cachedTemp = 0.0f;

@@ -20,7 +20,7 @@ void setup() {
   delay(500);
 
   if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
-    Serial.println("Failed to initialize sensors!");
+    Serial.println(F("Failed to initialize sensors!"));
     while (1);
   }
 
@@ -28,7 +28,7 @@ void setup() {
   sensor.imu.setODR(ODR_4KHZ); 
 
   // Fast Gyro Calibration
-  Serial.println("Calibrating Gyro... Keep still!");
+  Serial.println(F("Calibrating Gyro... Keep still!"));
   sensor.autoCalibrateGyro(500); 
 
   // NOTE: SimpleTriFusion integrates the gyro only - it never reads the
@@ -45,7 +45,7 @@ void setup() {
   fusion.setMagSoftIron(softIron);
   fusion.setDeclination(5.6); 
 
-  Serial.println("Calibrating initial orientation...");
+  Serial.println(F("Calibrating initial orientation..."));
   fusion.initOrientation();
 }
 
@@ -58,9 +58,9 @@ void loop() {
       float roll, pitch, yaw;
       fusion.getOrientationDegrees(roll, pitch, yaw);
       
-      Serial.print("R: "); Serial.print(roll, 1);
-      Serial.print("\tP: "); Serial.print(pitch, 1);
-      Serial.print("\tY: "); Serial.println(yaw, 1);
+      Serial.print(F("R: ")); Serial.print(roll, 1);
+      Serial.print(F("\tP: ")); Serial.print(pitch, 1);
+      Serial.print(F("\tY: ")); Serial.println(yaw, 1);
     }
   }
 }

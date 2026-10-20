@@ -23,14 +23,14 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10); 
 
-  Serial.println("Initializing TriSense in I2C mode...");
+  Serial.println(F("Initializing TriSense in I2C mode..."));
 
   if (!sensor.beginAll(MODE_I2C)) {
-    Serial.println("Error: Sensors not found! Check wiring.");
+    Serial.println(F("Error: Sensors not found! Check wiring."));
     while (1) delay(100);
   }
 
-  Serial.println("System Ready. Reading unified snapshot...");
+  Serial.println(F("System Ready. Reading unified snapshot..."));
 }
 
 void loop() {
@@ -47,33 +47,33 @@ void loop() {
       lastPrint = millis();
 
       // --- DATA OUTPUT ---
-      Serial.print("A [g]: ");
-      Serial.print(data.accelX, 2); Serial.print(", ");
-      Serial.print(data.accelY, 2); Serial.print(", ");
+      Serial.print(F("A [g]: "));
+      Serial.print(data.accelX, 2); Serial.print(F(", "));
+      Serial.print(data.accelY, 2); Serial.print(F(", "));
       Serial.print(data.accelZ, 2);
       
-      Serial.print(" | G [dps]: ");
-      Serial.print(data.gyroX, 1); Serial.print(", ");
-      Serial.print(data.gyroY, 1); Serial.print(", ");
+      Serial.print(F(" | G [dps]: "));
+      Serial.print(data.gyroX, 1); Serial.print(F(", "));
+      Serial.print(data.gyroY, 1); Serial.print(F(", "));
       Serial.print(data.gyroZ, 1);
 
       // The magnetometer only produces a new sample every 10 ms, so this value
       // is often a few milliseconds old. magAgeUs says exactly how old.
-      Serial.print(" | M [uT]: ");
-      Serial.print(data.magX, 1); Serial.print(", ");
-      Serial.print(data.magY, 1); Serial.print(", ");
+      Serial.print(F(" | M [uT]: "));
+      Serial.print(data.magX, 1); Serial.print(F(", "));
+      Serial.print(data.magY, 1); Serial.print(F(", "));
       Serial.print(data.magZ, 1);
-      Serial.print(" (age "); Serial.print(data.magAgeUs / 1000); Serial.print(" ms)");
+      Serial.print(F(" (age ")); Serial.print(data.magAgeUs / 1000); Serial.print(F(" ms)"));
 
-      Serial.print(" | Baro: ");
-      Serial.print(data.pressure); Serial.print(" Pa, ");
-      Serial.print(data.temperature); Serial.print(" C");
+      Serial.print(F(" | Baro: "));
+      Serial.print(data.pressure); Serial.print(F(" Pa, "));
+      Serial.print(data.temperature); Serial.print(F(" C"));
 
       // Altitude needs a sea-level reference pressure in PASCALS (not hPa).
       // 101325.0 Pa is the ISA standard day; substitute your local QNH
       // (hPa from a weather report x 100) for an accurate absolute altitude.
-      Serial.print(" | Alt: ");
-      Serial.print(sensor.readAltitude(101325.0f), 1); Serial.println(" m");
+      Serial.print(F(" | Alt: "));
+      Serial.print(sensor.readAltitude(101325.0f), 1); Serial.println(F(" m"));
     }
   }
 }

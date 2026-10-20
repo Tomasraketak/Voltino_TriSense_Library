@@ -1,8 +1,5 @@
 #include "TriSense.h"
 
-TriSense::TriSense() {
-  memset(&_last, 0, sizeof(_last));
-}
 
 bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi) {
   TriSenseConfig defaults;
@@ -166,7 +163,6 @@ float TriSense::readPressure() { return bmp.readPressure(); }
 float TriSense::readTemperature() { return bmp.readTemperature(); }
 float TriSense::readAltitude(float seaLevelPressure) { return bmp.readAltitude(seaLevelPressure); }
 
-TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
 
 void TriSenseFusion::trackUpdateRate() {
   _updateCount++;
@@ -627,11 +623,33 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
-SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void SimpleTriFusion::enableLightweightGravity(bool enable, float kp) {
   _lightweightGravityEnabled = enable;
   _lightweightKp = kp;
+}
+
+// One gyro step (deg/s in), nudged toward the measured gravity direction when
+// the lightweight correction is on. Shared by the FIFO and the no-FIFO path.
+void SimpleTriFusion::integrateSample(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
+                                      FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz,
+                                      FUSION_MATH_TYPE dt) {
+  FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
+  FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
+  FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
+
+  if (_lightweightGravityEnabled) {
+      FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
+      FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
+      FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
+      FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
+      FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
+      gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
+      gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
+      gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
+  }
+  gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
+  trackUpdateRate();
 }
 
 bool SimpleTriFusion::update() {
@@ -658,22 +676,7 @@ bool SimpleTriFusion::update() {
       // here and must not be rounded up, or that sample gets integrated twice.
       if (dt > 0.05) dt = 0.05;
       
-      FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
-      FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
-      FUSION_MATH_TYPE gz_rad = lastGz * (FUSION_MATH_TYPE)PI/180.0;
-
-      if (_lightweightGravityEnabled) {
-          FUSION_MATH_TYPE norm = invSqrt(lastAx*lastAx + lastAy*lastAy + lastAz*lastAz);
-          FUSION_MATH_TYPE ax_n = lastAx * norm, ay_n = lastAy * norm, az_n = lastAz * norm;
-          FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
-          FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
-          FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
-          gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
-          gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
-          gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
-      }
-      gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
-      trackUpdateRate();
+      integrateSample(lastAx, lastAy, lastAz, lastGx, lastGy, lastGz, dt);
     }
   } else {
     // Ask the driver how many packets are waiting BEFORE draining them. That is
@@ -716,23 +719,7 @@ bool SimpleTriFusion::update() {
         sumAx += ax; sumAy += ay; sumAz += az;
         sumGx += gx; sumGy += gy; sumGz += gz;
 
-        FUSION_MATH_TYPE gx_rad = gx * (FUSION_MATH_TYPE)PI/180.0;
-        FUSION_MATH_TYPE gy_rad = gy * (FUSION_MATH_TYPE)PI/180.0;
-        FUSION_MATH_TYPE gz_rad = gz * (FUSION_MATH_TYPE)PI/180.0;
-
-        if (_lightweightGravityEnabled) {
-            FUSION_MATH_TYPE norm = invSqrt(ax*ax + ay*ay + az*az);
-            FUSION_MATH_TYPE ax_n = ax * norm, ay_n = ay * norm, az_n = az * norm;
-            FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
-            FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
-            FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
-            gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
-            gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
-            gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
-        }
-
-        gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
-        trackUpdateRate();
+        integrateSample(ax, ay, az, gx, gy, gz, perfect_dt);
         processed++;
     }
 
@@ -752,7 +739,6 @@ bool SimpleTriFusion::update() {
   return dataProcessed;
 }
 
-AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
                                                 FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
@@ -901,19 +887,7 @@ bool AdvancedTriFusion::update() {
                       (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
                       (lastGz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, dt);
       trackUpdateRate(); 
-      
-      unsigned long now = micros();
-      if (now - lastMagCheckTime >= magCheckIntervalUs) {
-        lastMagCheckTime = now;
-        if (_mag->readData()) {
-          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
-          
-          FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
-          if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
-          complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
-          lastSuccessfulCorrectionTime = now;
-        }
-      }
+      scheduledCorrection();
     }
   } else {
     // Ask the driver how many packets are waiting BEFORE draining them. That is
@@ -981,20 +955,24 @@ bool AdvancedTriFusion::update() {
     }
 
     // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
-    {
-      unsigned long now = micros();
-      if (now - lastMagCheckTime >= magCheckIntervalUs) {
-        lastMagCheckTime = now;
-        if (_mag->readData()) {
-          applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
-          
-          FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
-          if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
-          complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
-          lastSuccessfulCorrectionTime = now;
-        }
-      }
-    }
+    scheduledCorrection();
   }
   return dataProcessed;
+}
+
+// The slow correction, at most once per magCheckIntervalUs and only when the
+// magnetometer has a fresh sample. One copy for both update() paths.
+void AdvancedTriFusion::scheduledCorrection() {
+  unsigned long now = micros();
+  if (now - lastMagCheckTime >= magCheckIntervalUs) {
+    lastMagCheckTime = now;
+    if (_mag->readData()) {
+      applyMagCalibration(_mag->x, _mag->y, _mag->z, lastMx, lastMy, lastMz);
+
+      FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
+      if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
+      complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
+      lastSuccessfulCorrectionTime = now;
+    }
+  }
 }

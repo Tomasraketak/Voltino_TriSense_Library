@@ -124,7 +124,7 @@ bool beginWithCustomPins() {
 
 #else
   // AVR and other classic cores: hardware SPI/I2C pins are fixed, no remapping possible.
-  Serial.println("This core has fixed SPI/I2C pins - using default wiring.");
+  Serial.println(F("This core has fixed SPI/I2C pins - using default wiring."));
   return sensor.beginAll(MODE_HYBRID, TRISENSE_CS, 8000000);
 #endif
 }
@@ -133,12 +133,12 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
 
-  Serial.println("=========================================");
-  Serial.println("Voltino TriSense - Custom SPI/I2C Pins Demo");
-  Serial.println("=========================================");
+  Serial.println(F("========================================="));
+  Serial.println(F("Voltino TriSense - Custom SPI/I2C Pins Demo"));
+  Serial.println(F("========================================="));
 
   if (!beginWithCustomPins()) {
-    Serial.println("ERROR: Sensor not found! Check the custom pin wiring above.");
+    Serial.println(F("ERROR: Sensor not found! Check the custom pin wiring above."));
     while (1) delay(100);
   }
 
@@ -165,11 +165,11 @@ void setup() {
   // Continuously learn the gyro's resting drift while flying.
   fusion.setDynamicGyroBias(true, 0.0001f);
 
-  Serial.println("Running static calibration - keep the module still!");
+  Serial.println(F("Running static calibration - keep the module still!"));
   fusion.initOrientation(1000);
-  Serial.print("SPI pin release: ");
+  Serial.print(F("SPI pin release: "));
   Serial.println(sensor.imu.isSpiPinReleaseActive() ? "active" : "off");
-  Serial.println("Ready.");
+  Serial.println(F("Ready."));
 }
 
 void loop() {
@@ -195,20 +195,20 @@ void loop() {
       float glAx, glAy, glAz;
       fusion.getGlobalLinearAcceleration(glAx, glAy, glAz, ACCEL_UNIT_MS2);
 
-      Serial.print("Roll:"); Serial.print(roll, 1);
-      Serial.print(" Pitch:"); Serial.print(pitch, 1);
-      Serial.print(" Yaw:"); Serial.print(yaw, 1);
-      Serial.print(" Yaw_MagOnly:"); Serial.print(yawMagOnly, 1);
+      Serial.print(F("Roll:")); Serial.print(roll, 1);
+      Serial.print(F(" Pitch:")); Serial.print(pitch, 1);
+      Serial.print(F(" Yaw:")); Serial.print(yaw, 1);
+      Serial.print(F(" Yaw_MagOnly:")); Serial.print(yawMagOnly, 1);
 
-      Serial.print(" | GlobalAcc(m/s^2) X:"); Serial.print(gAx, 3);
-      Serial.print(" Y:"); Serial.print(gAy, 3);
-      Serial.print(" Z:"); Serial.print(gAz, 3);
+      Serial.print(F(" | GlobalAcc(m/s^2) X:")); Serial.print(gAx, 3);
+      Serial.print(F(" Y:")); Serial.print(gAy, 3);
+      Serial.print(F(" Z:")); Serial.print(gAz, 3);
 
-      Serial.print(" | LinearAcc(m/s^2) X:"); Serial.print(glAx, 3);
-      Serial.print(" Y:"); Serial.print(glAy, 3);
-      Serial.print(" Z:"); Serial.print(glAz, 3);
+      Serial.print(F(" | LinearAcc(m/s^2) X:")); Serial.print(glAx, 3);
+      Serial.print(F(" Y:")); Serial.print(glAy, 3);
+      Serial.print(F(" Z:")); Serial.print(glAz, 3);
 
-      Serial.print(" | FusionHz:"); Serial.print(fusion.getActualFusionHz(), 1);
+      Serial.print(F(" | FusionHz:")); Serial.print(fusion.getActualFusionHz(), 1);
 
       // Dropped FIFO packets are unrecoverable lost rotation - surface them.
       // Two different numbers, and only the second is a quantity:
@@ -217,11 +217,11 @@ void loop() {
       // A full FIFO the loop still drains in time loses nothing, so a high event
       // count next to zero lost packets means the data is intact.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO FULL (events ");
+        Serial.print(F("  !! FIFO FULL (events "));
         Serial.print(sensor.imu.getFIFOOverflowCount());
-        Serial.print(", packets lost ");
+        Serial.print(F(", packets lost "));
         Serial.print(sensor.imu.getLostPacketCount());
-        Serial.print(")");
+        Serial.print(F(")"));
       }
       Serial.println();
     }

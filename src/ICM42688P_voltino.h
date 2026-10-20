@@ -156,7 +156,10 @@ enum ICM_FIFO_MODE {
 
 class ICM42688P {
 public:
-  ICM42688P();
+  // constexpr: all initial values live in the class (below), so a global
+  // driver object is laid out by the compiler instead of being built by
+  // start-up code. Same object, less flash on small parts.
+  constexpr ICM42688P() {}
   
   // --- Initialization ---
   bool beginI2C(uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sdaPin = -1, int8_t sclPin = -1);
@@ -349,11 +352,11 @@ public:
 private:
   TwoWire* _wire = &Wire;
   TriSenseSPIClass* _spi = &SPI;
-  ICM_BUS _bus;
-  int8_t _csPin;
-  uint8_t _i2cAddr;
-  uint32_t _spiFreq;
-  uint8_t _spiMode;
+  ICM_BUS _bus = BUS_I2C;
+  int8_t _csPin = -1;
+  uint8_t _i2cAddr = ICM_ADDR_PRIMARY;
+  uint32_t _spiFreq = 0;
+  uint8_t _spiMode = (uint8_t)SPI_MODE0;
 
   // SPI pin release state (see setSpiPinRelease()).
   int8_t _relSck = -1;
@@ -368,22 +371,22 @@ private:
   uint32_t _relMosiPad = 0;
 
   // Remembered so wake() can put everything back.
-  ICM_ACCEL_FS _accelFs;
-  ICM_GYRO_FS _gyroFs;
-  uint8_t _pwrMgmt0;
+  ICM_ACCEL_FS _accelFs = AFS_16G;
+  ICM_GYRO_FS _gyroFs = GFS_2000DPS;
+  uint8_t _pwrMgmt0 = ICM42688_PWR_SENSORS_LN;
   bool _sleeping = false;
   uint32_t _powerOnMs = 0;
   // _requestedOdr is what the sketch asked for; _odr is what the bus can
   // actually sustain in the current FIFO mode. Keeping them apart lets the
   // requested rate be restored when the packet size (and so the bandwidth
   // demand) drops again - see enforceBandwidthLimit().
-  ICM_ODR _requestedOdr;
-  ICM_ODR _odr;
-  ICM_FIFO_MODE _fifoMode;
-  bool _debug;
+  ICM_ODR _requestedOdr = ODR_1KHZ;
+  ICM_ODR _odr = ODR_1KHZ;
+  ICM_FIFO_MODE _fifoMode = FIFO_NONE;
+  bool _debug = false;
 
-  float _accelScaleFactor;
-  float _gyroScaleFactor;
+  float _accelScaleFactor = 1.0f / 2048.0f;
+  float _gyroScaleFactor = 1.0f / 16.4f;
 
   float gyrOffset[3] = {0,0,0};
   float accOffset[3] = {0,0,0};
@@ -411,7 +414,7 @@ private:
 #else
   static const uint8_t FIFO_BURST_PACKETS = 32;   // 640 B - conservative default
 #endif
-  uint8_t _fifoBuf[FIFO_BURST_PACKETS * FIFO_MAX_PACKET_SIZE];
+  uint8_t _fifoBuf[FIFO_BURST_PACKETS * FIFO_MAX_PACKET_SIZE] = {};
   uint8_t _fifoBufCount = 0;   // Packets currently held in _fifoBuf
   uint8_t _fifoBufIndex = 0;   // Next packet to hand out
   uint8_t _fifoPacketSize = 16;
@@ -422,6 +425,8 @@ private:
   uint16_t _lostPacketLastRaw = 0;  // Previous raw reading, to detect the wrap
   bool _lostPacketPrimed = false;
 
+  void scaleSample(const int32_t raw[6], float aScale, float gScale,
+                   float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   const uint8_t* nextFIFOPacket();                 // Next usable packet, skipping message packets
   uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
   void readFIFOBytes(uint8_t *buf, size_t len);    // Bulk FIFO_DATA read (chunked on I2C)

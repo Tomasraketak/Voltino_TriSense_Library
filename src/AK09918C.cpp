@@ -1,9 +1,5 @@
 #include "AK09918C.h"
 
-AK09918C::AK09918C() {
-  _wire = &Wire;
-  _currentMode = ODR_100HZ;
-}
 
 // Standalone initialization matching Voltino conventions
 bool AK09918C::beginI2C(uint32_t freq, int8_t sdaPin, int8_t sclPin, AK09918_ODR odr) {

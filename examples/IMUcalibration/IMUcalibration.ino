@@ -17,21 +17,21 @@ void setup() {
   while (!Serial);
   delay(500);
 
-  Serial.println("Initializing TriSense...");
+  Serial.println(F("Initializing TriSense..."));
 
   if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
-    Serial.println("Initialization failed! Check wiring.");
+    Serial.println(F("Initialization failed! Check wiring."));
     while (1);
   }
   
   sensor.imu.setODR(ODR_500HZ); 
 
-  Serial.println("--------------------------------------");
-  Serial.println("Voltino TriSense Calibration Tool v1.2");
-  Serial.println("--------------------------------------");
-  Serial.println("[g] -> Calibrate GYRO (Keep still!)");
-  Serial.println("[a] -> Calibrate ACCELEROMETER (6 positions)");
-  Serial.println("--------------------------------------");
+  Serial.println(F("--------------------------------------"));
+  Serial.println(F("Voltino TriSense Calibration Tool v1.2"));
+  Serial.println(F("--------------------------------------"));
+  Serial.println(F("[g] -> Calibrate GYRO (Keep still!)"));
+  Serial.println(F("[a] -> Calibrate ACCELEROMETER (6 positions)"));
+  Serial.println(F("--------------------------------------"));
 }
 
 void loop() {

@@ -43,7 +43,7 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
 
-  Serial.println("Voltino TriSense - Low Power demo");
+  Serial.println(F("Voltino TriSense - Low Power demo"));
 
   TriSenseConfig cfg;               // Defaults = the classic beginAll() rates
   cfg.magOdr      = AK_ODR_10HZ;    // 100 Hz -> 10 Hz
@@ -57,15 +57,15 @@ void setup() {
   cfg.spiMode     = SPI_MODE3;      // SCK idles HIGH like the I2C SCL
 
   if (!sensor.beginAll(MODE_HYBRID, cfg, TRISENSE_CS, 4000000)) {
-    Serial.println("Error: Sensors not found! Check wiring.");
+    Serial.println(F("Error: Sensors not found! Check wiring."));
     while (1) delay(100);
   }
 
   if (!sensor.baroConfigValid()) {
-    Serial.println("WARNING: barometer cannot meet this OSR/ODR pair - lower one of them.");
+    Serial.println(F("WARNING: barometer cannot meet this OSR/ODR pair - lower one of them."));
   }
 
-  Serial.print("SPI pin release: ");
+  Serial.print(F("SPI pin release: "));
   Serial.println(sensor.imu.isSpiPinReleaseActive() ? "active" : "off (not supported on this core / pins unknown)");
 
   phaseStart = millis();
@@ -76,8 +76,8 @@ void loop() {
 
   if (sensor.isSleeping()) {
     if (now - phaseStart >= ASLEEP_MS) {
-      Serial.println("--- wake ---");
-      if (!sensor.wake()) Serial.println("Error: IMU did not answer after wake().");
+      Serial.println(F("--- wake ---"));
+      if (!sensor.wake()) Serial.println(F("Error: IMU did not answer after wake()."));
       phaseStart = millis();
     }
     // A real application would put the MCU to sleep here as well.
@@ -86,7 +86,7 @@ void loop() {
   }
 
   if (now - phaseStart >= AWAKE_MS) {
-    Serial.println("--- sleep ---");
+    Serial.println(F("--- sleep ---"));
     sensor.sleep();
     phaseStart = millis();
     return;
@@ -95,15 +95,15 @@ void loop() {
   TriSenseDataSnapshot data;
   if (sensor.getSnapshot(data) && now - lastPrint >= 500) {
     lastPrint = now;
-    Serial.print("A [g]: ");
-    Serial.print(data.accelX, 2); Serial.print(", ");
-    Serial.print(data.accelY, 2); Serial.print(", ");
+    Serial.print(F("A [g]: "));
+    Serial.print(data.accelX, 2); Serial.print(F(", "));
+    Serial.print(data.accelY, 2); Serial.print(F(", "));
     Serial.print(data.accelZ, 2);
-    Serial.print(" | M [uT]: ");
-    Serial.print(data.magX, 1); Serial.print(", ");
-    Serial.print(data.magY, 1); Serial.print(", ");
+    Serial.print(F(" | M [uT]: "));
+    Serial.print(data.magX, 1); Serial.print(F(", "));
+    Serial.print(data.magY, 1); Serial.print(F(", "));
     Serial.print(data.magZ, 1);
-    Serial.print(" | P: ");
-    Serial.print(data.pressure); Serial.println(" Pa");
+    Serial.print(F(" | P: "));
+    Serial.print(data.pressure); Serial.println(F(" Pa"));
   }
 }

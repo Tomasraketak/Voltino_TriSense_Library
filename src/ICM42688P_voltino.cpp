@@ -1,5 +1,19 @@
 #include "ICM42688P_voltino.h"
 
+// Constant lookup tables live in flash on AVR, where plain const data is
+// copied to the (scarce) RAM at start-up. Elsewhere const data is already in
+// flash and the accessors are plain reads.
+#if defined(__AVR__)
+  #include <avr/pgmspace.h>
+  #define ICM_TABLE_ATTR PROGMEM
+  #define ICM_TABLE_BYTE(p) pgm_read_byte(p)
+  #define ICM_TABLE_WORD(p) pgm_read_word(p)
+#else
+  #define ICM_TABLE_ATTR
+  #define ICM_TABLE_BYTE(p) (*(p))
+  #define ICM_TABLE_WORD(p) (*(p))
+#endif
+
 // SPI pin release (see setSpiPinRelease()) needs a way to stop the MCU from
 // driving SCK and MOSI between transactions and to hand them back to the SPI
 // peripheral afterwards. There is no Arduino API for that - pinMode() does not
@@ -64,21 +78,6 @@
   #define ICM_SPI_MODE_T uint8_t
 #endif
 
-ICM42688P::ICM42688P() {
-  _accelScaleFactor = 1.0f / 2048.0f; 
-  _gyroScaleFactor = 1.0f / 16.4f;
-  _i2cAddr = ICM_ADDR_PRIMARY;
-  _requestedOdr = ODR_1KHZ;
-  _odr = ODR_1KHZ;
-  _fifoMode = FIFO_NONE;
-  _fifoPacketSize = 16;
-  _debug = false;
-  _csPin = -1;
-  _spiMode = (uint8_t)SPI_MODE0;
-  _accelFs = AFS_16G;
-  _gyroFs = GFS_2000DPS;
-  _pwrMgmt0 = ICM42688_PWR_SENSORS_LN;
-}
 
 void ICM42688P::setDebug(bool enable) { _debug = enable; }
 
@@ -661,22 +660,24 @@ ICM_FIFO_MODE ICM42688P::getFIFOMode() {
   return _fifoMode;
 }
 
+// Every supported ODR from fastest to slowest. The enum is not ordered by
+// frequency - ODR_500HZ is 0xF, below ODR_12_5HZ's 0xB - so the order has to be
+// spelled out. Shared by enforceBandwidthLimit() and stepDownODR().
+static const uint8_t kOdrLadder[] ICM_TABLE_ATTR = {
+  ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ,
+  ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ
+};
+static const uint8_t kOdrLadderLen = sizeof(kOdrLadder);
+
+// Rate in Hz indexed by the ODR register value (0 = reserved).
+static const uint16_t kOdrHz[16] ICM_TABLE_ATTR = {
+  0, 32000, 16000, 8000, 4000, 2000, 1000, 200, 100, 50, 25, 12, 0, 0, 0, 500
+};
+
+static inline ICM_ODR odrLadderAt(uint8_t i) { return (ICM_ODR)ICM_TABLE_BYTE(&kOdrLadder[i]); }
+
 int ICM42688P::_getHzFromODR(ICM_ODR odr) {
-  switch(odr) {
-    case ODR_32KHZ: return 32000;
-    case ODR_16KHZ: return 16000;
-    case ODR_8KHZ:  return 8000;
-    case ODR_4KHZ:  return 4000;
-    case ODR_2KHZ:  return 2000;
-    case ODR_1KHZ:  return 1000;
-    case ODR_500HZ: return 500;
-    case ODR_200HZ: return 200;
-    case ODR_100HZ: return 100;
-    case ODR_50HZ:  return 50;
-    case ODR_25HZ:  return 25;
-    case ODR_12_5HZ:return 12; 
-    default: return 0;
-  }
+  return ((uint8_t)odr < 16) ? (int)ICM_TABLE_WORD(&kOdrHz[(uint8_t)odr]) : 0;
 }
 
 void ICM42688P::enforceBandwidthLimit() {
@@ -694,17 +695,16 @@ void ICM42688P::enforceBandwidthLimit() {
   // clamped to. Otherwise a downgrade is permanent: switching to a cheaper FIFO
   // mode later frees bandwidth, but the original request has been forgotten and
   // the sensor stays stuck at the reduced rate.
-  ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
   ICM_ODR safeODR = _requestedOdr;
   int requestedHz = _getHzFromODR(_requestedOdr);
 
-  for (int i = 0; i < 12; i++) {
-    int targetHz = _getHzFromODR(odrList[i]);
+  for (uint8_t i = 0; i < kOdrLadderLen; i++) {
+    int targetHz = _getHzFromODR(odrLadderAt(i));
     if (targetHz > requestedHz) continue; 
     
     uint32_t requiredBps = bitsPerRead * targetHz;
     if (requiredBps <= maxAllowedBps) {
-      safeODR = odrList[i];
+      safeODR = odrLadderAt(i);
       break;
     }
   }
@@ -848,21 +848,15 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
 }
 
 bool ICM42688P::stepDownODR() {
-  // Descending ladder. The enum is not ordered by frequency - ODR_500HZ is 0xF,
-  // below ODR_12_5HZ's 0xB - so the order has to be spelled out.
-  static const ICM_ODR ladder[] = {
-    ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ,
-    ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ
-  };
-  const uint8_t n = sizeof(ladder) / sizeof(ladder[0]);
+  const uint8_t n = kOdrLadderLen;
 
   uint8_t cur = n;
   for (uint8_t i = 0; i < n; i++) {
-    if (ladder[i] == _odr) { cur = i; break; }
+    if (odrLadderAt(i) == _odr) { cur = i; break; }
   }
   if (cur >= n - 1) return false;   // Unknown, or already at the bottom
 
-  const ICM_ODR next = ladder[cur + 1];
+  const ICM_ODR next = odrLadderAt(cur + 1);
   Serial.print(F("Voltino TriSense: "));
   Serial.print(_getHzFromODR(_odr));
   Serial.print(F(" Hz could not be serviced - falling back to "));
@@ -1058,16 +1052,24 @@ bool ICM42688P::readSensorData(float& ax, float& ay, float& az, float& gx, float
   int16_t rawGz = (int16_t)((buffer[10] << 8) | buffer[11]);
   
   if (rawAx == -1 && rawAy == -1 && rawAz == -1 && rawGx == -1) return false;
-  
-  ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
-  ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
-  az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
-  
-  gx = (float)rawGx * _gyroScaleFactor - gyrOffset[0];
-  gy = (float)rawGy * _gyroScaleFactor - gyrOffset[1];
-  gz = (float)rawGz * _gyroScaleFactor - gyrOffset[2];
-  
+
+  const int32_t raw[6] = { rawAx, rawAy, rawAz, rawGx, rawGy, rawGz };
+  scaleSample(raw, _accelScaleFactor, _gyroScaleFactor, ax, ay, az, gx, gy, gz);
   return true;
+}
+
+// Raw counts to calibrated units, shared by all three read paths so the
+// arithmetic exists once. Every raw value - 16-bit or 20-bit - converts to
+// float exactly, so routing the 16-bit paths through int32_t changes nothing.
+void ICM42688P::scaleSample(const int32_t raw[6], float aScale, float gScale,
+                            float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  ax = ((float)raw[0] * aScale - accOffset[0]) * accScale[0];
+  ay = ((float)raw[1] * aScale - accOffset[1]) * accScale[1];
+  az = ((float)raw[2] * aScale - accOffset[2]) * accScale[2];
+
+  gx = (float)raw[3] * gScale - gyrOffset[0];
+  gy = (float)raw[4] * gScale - gyrOffset[1];
+  gz = (float)raw[5] * gScale - gyrOffset[2];
 }
 
 // Hands back the next usable packet in the burst buffer, refilling from the
@@ -1105,14 +1107,8 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   int16_t rawGy = (int16_t)((buffer[9] << 8) | buffer[10]);
   int16_t rawGz = (int16_t)((buffer[11] << 8) | buffer[12]);
 
-  ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
-  ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
-  az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
-  
-  gx = (float)rawGx * _gyroScaleFactor - gyrOffset[0];
-  gy = (float)rawGy * _gyroScaleFactor - gyrOffset[1];
-  gz = (float)rawGz * _gyroScaleFactor - gyrOffset[2];
-
+  const int32_t raw[6] = { rawAx, rawAy, rawAz, rawGx, rawGy, rawGz };
+  scaleSample(raw, _accelScaleFactor, _gyroScaleFactor, ax, ay, az, gx, gy, gz);
   return true;
 }
 
@@ -1149,14 +1145,8 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 
-  ax = ((float)rawAx * scaleAccel20 - accOffset[0]) * accScale[0];
-  ay = ((float)rawAy * scaleAccel20 - accOffset[1]) * accScale[1];
-  az = ((float)rawAz * scaleAccel20 - accOffset[2]) * accScale[2];
-  
-  gx = (float)rawGx * scaleGyro20 - gyrOffset[0];
-  gy = (float)rawGy * scaleGyro20 - gyrOffset[1];
-  gz = (float)rawGz * scaleGyro20 - gyrOffset[2];
-
+  const int32_t raw[6] = { rawAx, rawAy, rawAz, rawGx, rawGy, rawGz };
+  scaleSample(raw, scaleAccel20, scaleGyro20, ax, ay, az, gx, gy, gz);
   return true;
 }
 

@@ -17,7 +17,7 @@ void setup() {
   delay(500);
 
   if (!sensor.beginAll(MODE_I2C)) {
-    Serial.println("Error: Sensors not found!");
+    Serial.println(F("Error: Sensors not found!"));
     while (1) delay(10);
   }
 
@@ -37,21 +37,21 @@ void loop() {
   if (sensor.mag.readData()) {
     
     // MotionCal expects format: "Raw:ax,ay,az,gx,gy,gz,mx,my,mz" (integers)
-    Serial.print("Raw:");
+    Serial.print(F("Raw:"));
     
     // Accel: Multiply by 8192 (Approx. raw LSB for 4G range)
-    Serial.print((int)(ax * 8192)); Serial.print(",");
-    Serial.print((int)(ay * 8192)); Serial.print(",");
-    Serial.print((int)(az * 8192)); Serial.print(",");
+    Serial.print((int)(ax * 8192)); Serial.print(F(","));
+    Serial.print((int)(ay * 8192)); Serial.print(F(","));
+    Serial.print((int)(az * 8192)); Serial.print(F(","));
 
     // Gyro: Multiply by 16 (Approx. raw sensitivity)
-    Serial.print((int)(gx * 16));   Serial.print(",");
-    Serial.print((int)(gy * 16));   Serial.print(",");
-    Serial.print((int)(gz * 16));   Serial.print(",");
+    Serial.print((int)(gx * 16));   Serial.print(F(","));
+    Serial.print((int)(gy * 16));   Serial.print(F(","));
+    Serial.print((int)(gz * 16));   Serial.print(F(","));
 
     // Mag: MotionCal expects values ~10 times larger than uT (raw format)
-    Serial.print((int)(sensor.mag.x * 10)); Serial.print(",");
-    Serial.print((int)(sensor.mag.y * 10)); Serial.print(",");
+    Serial.print((int)(sensor.mag.x * 10)); Serial.print(F(","));
+    Serial.print((int)(sensor.mag.y * 10)); Serial.print(F(","));
     Serial.println((int)(sensor.mag.z * 10));
   }
 }

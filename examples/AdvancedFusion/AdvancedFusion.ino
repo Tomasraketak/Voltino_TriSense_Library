@@ -23,7 +23,7 @@ void setup() {
 
   // 1. Sensor Initialization (Hybrid Mode: AK/BMP on I2C, ICM on SPI CS17)
   if (!sensor.beginAll(MODE_HYBRID, 17, 10000000)) {
-    Serial.println("Sensor init failed!");
+    Serial.println(F("Sensor init failed!"));
     while (1);
   }
 
@@ -37,7 +37,7 @@ void setup() {
   sensor.imu.setAccelSoftwareOffset(0.00, 0.00, 0.00);
   sensor.imu.setAccelSoftwareScale(1.00, 1.00, 1.00);
   
-  Serial.println("Calibrating Gyro... Keep still!");
+  Serial.println(F("Calibrating Gyro... Keep still!"));
   sensor.autoCalibrateGyro(1000); 
 
   fusion.setMagHardIron(-46.02, -0.85, -46.00);
@@ -55,9 +55,9 @@ void setup() {
   fusion.setDynamicGyroBias(true, 0.0001f);
   fusion.setMaxGyroBias(5.0f);
 
-  Serial.println("Calibrating initial orientation...");
+  Serial.println(F("Calibrating initial orientation..."));
   fusion.initOrientation();
-  Serial.println("Calibration Done, System Running.");
+  Serial.println(F("Calibration Done, System Running."));
 }
 
 void loop() {
@@ -71,13 +71,13 @@ void loop() {
       float roll, pitch, yaw;
       fusion.getOrientationDegrees(roll, pitch, yaw);
       
-      Serial.print("Roll: "); Serial.print(roll, 1);
-      Serial.print(" | Pitch: "); Serial.print(pitch, 1);
-      Serial.print(" | Yaw: "); Serial.print(yaw, 1);
+      Serial.print(F("Roll: ")); Serial.print(roll, 1);
+      Serial.print(F(" | Pitch: ")); Serial.print(pitch, 1);
+      Serial.print(F(" | Yaw: ")); Serial.print(yaw, 1);
 
       // Magnetometer-only heading, for comparison against the fused yaw above.
-      Serial.print(" | Yaw(mag only): "); Serial.print(fusion.getMagHeadingDegrees(), 1);
-      Serial.print(" | "); Serial.print(fusion.getActualFusionHz(), 0); Serial.print(" Hz");
+      Serial.print(F(" | Yaw(mag only): ")); Serial.print(fusion.getMagHeadingDegrees(), 1);
+      Serial.print(F(" | ")); Serial.print(fusion.getActualFusionHz(), 0); Serial.print(F(" Hz"));
 
       // Dropped FIFO packets are unrecoverable lost rotation - surface them.
       //
@@ -88,11 +88,11 @@ void loop() {
       // event count next to a lost count of 0 means the data is intact. Compare
       // the Hz figure above against the ODR for the same answer.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO FULL (events ");
+        Serial.print(F("  !! FIFO FULL (events "));
         Serial.print(sensor.imu.getFIFOOverflowCount());
-        Serial.print(", packets lost ");
+        Serial.print(F(", packets lost "));
         Serial.print(sensor.imu.getLostPacketCount());
-        Serial.print(")");
+        Serial.print(F(")"));
       }
       Serial.println();
     }

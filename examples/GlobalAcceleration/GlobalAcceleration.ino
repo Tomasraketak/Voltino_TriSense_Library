@@ -33,7 +33,7 @@ void setup() {
   delay(1000); 
 
   if (!sensor.beginAll(MODE_HYBRID, 17)) {
-    Serial.println("Sensor init failed!");
+    Serial.println(F("Sensor init failed!"));
     while (1) delay(100);
   }
 
@@ -45,9 +45,9 @@ void setup() {
   // Only matters when you ask for ACCEL_UNIT_MS2 or integrate the result.
   fusion.setLocalGravity(9.8127f);
 
-  Serial.println("Calibrating initial orientation...");
+  Serial.println(F("Calibrating initial orientation..."));
   fusion.initOrientation();
-  Serial.println("System Running. Format: R, P, Y | GlobalAcc(G) | LinearAcc(G)");
+  Serial.println(F("System Running. Format: R, P, Y | GlobalAcc(G) | LinearAcc(G)"));
 }
 
 void loop() {
@@ -69,17 +69,17 @@ void loop() {
       float ax_lin, ay_lin, az_lin;
       fusion.getGlobalLinearAcceleration(ax_lin, ay_lin, az_lin);
 
-      Serial.print("R:"); Serial.print(roll, 1);
-      Serial.print("\tP:"); Serial.print(pitch, 1);
-      Serial.print("\tY:"); Serial.print(yaw, 1);
+      Serial.print(F("R:")); Serial.print(roll, 1);
+      Serial.print(F("\tP:")); Serial.print(pitch, 1);
+      Serial.print(F("\tY:")); Serial.print(yaw, 1);
       
-      Serial.print("  |  GlobalAcc(G) -> X:"); Serial.print(ax_g, 3);
-      Serial.print(" Y:"); Serial.print(ay_g, 3);
-      Serial.print(" Z:"); Serial.print(az_g, 3);
+      Serial.print(F("  |  GlobalAcc(G) -> X:")); Serial.print(ax_g, 3);
+      Serial.print(F(" Y:")); Serial.print(ay_g, 3);
+      Serial.print(F(" Z:")); Serial.print(az_g, 3);
 
-      Serial.print("  |  LinearAcc(G) -> X:"); Serial.print(ax_lin, 3);
-      Serial.print(" Y:"); Serial.print(ay_lin, 3);
-      Serial.print(" Z:"); Serial.print(az_lin, 3);
+      Serial.print(F("  |  LinearAcc(G) -> X:")); Serial.print(ax_lin, 3);
+      Serial.print(F(" Y:")); Serial.print(ay_lin, 3);
+      Serial.print(F(" Z:")); Serial.print(az_lin, 3);
 
       // Warn if the IMU FIFO overflowed since the last check. Those samples are
       // gone for good, so any integration across this interval has a permanent
@@ -91,11 +91,11 @@ void loop() {
       // A full FIFO the loop still drains in time loses nothing, so a high event
       // count next to zero lost packets means the data is intact.
       if (sensor.imu.fifoOverflowed()) {
-        Serial.print("  !! FIFO FULL (events ");
+        Serial.print(F("  !! FIFO FULL (events "));
         Serial.print(sensor.imu.getFIFOOverflowCount());
-        Serial.print(", packets lost ");
+        Serial.print(F(", packets lost "));
         Serial.print(sensor.imu.getLostPacketCount());
-        Serial.print(")");
+        Serial.print(F(")"));
       }
       Serial.println();
     }

@@ -159,7 +159,7 @@ public:
   AK09918C mag;
   ICM42688P imu;
 
-  TriSense();
+  constexpr TriSense() {}   // initial values are in the class, see below
   
   // All three sensors share one I2C bus (the ICM-42688-P leaves it only when
   // put on SPI in MODE_HYBRID), so the bus is selected once here and handed to
@@ -221,7 +221,7 @@ public:
   float readAltitude(float seaLevelPressure = 101325.0f);
 
 private:
-  TriSenseMode _mode;
+  TriSenseMode _mode = MODE_I2C;
   TwoWire* _wire = &Wire;
   bool _baroValid = true;
 #if defined(TRISENSE_DEBUG)
@@ -235,7 +235,7 @@ private:
   bool beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi);
 
   // Last known good reading of each block, plus when it was taken.
-  TriSenseDataSnapshot _last;
+  TriSenseDataSnapshot _last = {};
   bool _haveIMU = false;
   bool _haveMag = false;
   bool _haveBaro = false;
@@ -331,7 +331,11 @@ public:
   void quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw);
 
 public:
-  TriSenseFusion(ICM42688P* imu, AK09918C* mag);
+  // constexpr: every member has its initial value in the class, so a global
+  // fusion object is laid out by the compiler (copied into RAM with the rest of
+  // .data) instead of being built field by field by start-up code - about 1 KB
+  // less flash on AVR, and the same object either way.
+  constexpr TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
   virtual bool update() = 0;
   
   void setMountOrientation(TriSenseOrientation orientation);
@@ -378,8 +382,11 @@ class SimpleTriFusion : public TriSenseFusion {
 private:
   bool _lightweightGravityEnabled = false;
   float _lightweightKp = 0.02f;
+  void integrateSample(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az,
+                       FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz,
+                       FUSION_MATH_TYPE dt);
 public:
-  SimpleTriFusion(ICM42688P* imu, AK09918C* mag);
+  constexpr SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
   bool update() override;
   void enableLightweightGravity(bool enable, float kp = 0.02f); 
 };
@@ -392,8 +399,9 @@ private:
   void complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
                                FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                FUSION_MATH_TYPE correction_dt);
+  void scheduledCorrection();
 public:
-  AdvancedTriFusion(ICM42688P* imu, AK09918C* mag);
+  constexpr AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
   bool update() override;
 };
 
