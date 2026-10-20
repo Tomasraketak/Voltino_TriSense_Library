@@ -175,13 +175,15 @@ public:
   // and parks them as high-impedance inputs the rest of the time. See README,
   // "SPI pin release".
   //
-  // Implemented for RP2040 / RP2350 (arduino-pico), AVR, SAMD and the ESP32
-  // family; on other cores it is a no-op that returns false, and begin() falls
-  // back to SPI mode 3 instead (see setSpiMode()). Pass -1 for either pin to
+  // Implemented for RP2040 / RP2350 (arduino-pico), AVR, megaAVR (Nano
+  // Every), SAMD, the ESP32 family, Teensy 3.x / LC / 4.x and STM32
+  // (stm32duino); on other cores it is a no-op that returns false, and begin()
+  // falls back to SPI mode 3 instead (see setSpiMode()). Pass -1 for either pin to
   // switch it off. May be called before or after begin(). If it is never
   // called, begin() enables it on its own whenever the pins are known: passed
   // to begin(), or unambiguously found after SPI.begin() (the pin mux on
-  // RP2040/RP2350 and ESP32, the core's fixed SPI pins on AVR and SAMD).
+  // RP2040/RP2350 and ESP32, the core's default SPI pins elsewhere - checked
+  // to really be muxed to a peripheral on Teensy and STM32).
   // Returns true if release is active (or, before begin(), armed - the pins
   // are checked when begin() starts SPI).
   bool setSpiPinRelease(int8_t sckPin, int8_t mosiPin);
@@ -360,8 +362,10 @@ private:
   bool _relActive = false;       // Pins are currently being released between transactions
   bool _spiStarted = false;
   bool _spiModeSet = false;      // setSpiMode() was called - keep the sketch's choice
-  uint32_t _relSckCfg = 0;       // ESP32: saved GPIO matrix routing of SCK / MOSI
-  uint32_t _relMosiCfg = 0;
+  uint32_t _relSckCfg = 0;       // ESP32: GPIO matrix routing, Teensy: mux register
+  uint32_t _relMosiCfg = 0;      //   of SCK / MOSI, saved to write back
+  uint32_t _relSckPad = 0;       // Teensy 4.x: pad registers, likewise
+  uint32_t _relMosiPad = 0;
 
   // Remembered so wake() can put everything back.
   ICM_ACCEL_FS _accelFs;

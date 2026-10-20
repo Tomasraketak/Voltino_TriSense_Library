@@ -32,7 +32,8 @@
  *   - getMagHeadingDegrees() -> tilt-compensated magnetometer-only heading
  *   - fifoOverflowed()      -> detect dropped IMU packets
  *   - imu.setSpiPinRelease() -> park SCK/MOSI as inputs between IMU
- *                               transactions (RP2040/RP2350, AVR, SAMD, ESP32),
+ *                               transactions (RP2040/RP2350, AVR, megaAVR, SAMD,
+ *                               ESP32, Teensy, STM32),
  *                               on whichever SPI bus the module is on. Needed
  *                               on the TriSense Pro, whose level shifter drives
  *                               those pins while CS is HIGH - see README.

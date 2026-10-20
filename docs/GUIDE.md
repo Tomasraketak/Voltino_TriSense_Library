@@ -109,7 +109,7 @@ persistent equivalent — there, initialise the IMU directly with
 `sensor.imu.begin()` and pass the SPI pins explicitly. AVR pins are fixed in
 hardware. See `examples/CustomPins`.
 
-On RP2040 / RP2350, AVR, SAMD and ESP32 the IMU driver also releases SCK and
+On RP2040 / RP2350, AVR, megaAVR, SAMD, ESP32, Teensy and STM32 the IMU driver also releases SCK and
 MOSI between transactions (README, *SPI pin release*). It finds the pins by
 itself after `SPI.begin()`; if you remapped SPI and want to be explicit, add
 `sensor.imu.setSpiPinRelease(sck, mosi);` before `beginAll()`.
@@ -564,10 +564,11 @@ the module's SCK and MOSI pins whenever the IMU's CS is HIGH. If the MCU drives
 them too, the two outputs fight: 30–50 mA in total, and a multimeter on SCK or
 MOSI shows an in-between level of about 1–2 V instead of 0 V or 3.3 V.
 
-- **RP2040 / RP2350, AVR, SAMD, ESP32:** the driver releases the pins between
-  transactions. Check `sensor.imu.isSpiPinReleaseActive()`. If it is `false`,
-  the pins were not found (on ESP32 usually because a second SPI bus is in
-  use) — name them with `sensor.imu.setSpiPinRelease(sck, mosi)`.
+- **RP2040 / RP2350, AVR, megaAVR, SAMD, ESP32, Teensy, STM32:** the driver
+  releases the pins between transactions. Check
+  `sensor.imu.isSpiPinReleaseActive()`. If it is `false`, the pins were not
+  found (on ESP32 usually a second SPI bus in use, on Teensy/STM32 SPI moved
+  off its default pins) — name them with `sensor.imu.setSpiPinRelease(sck, mosi)`.
 - **Other cores:** pin release is not implemented; the driver switches to SPI
   mode 3, which takes away the SCK half of the fight while the I2C bus is
   idle. For the rest, put a 330–470 Ω resistor in series with SCK and MOSI

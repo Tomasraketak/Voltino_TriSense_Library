@@ -8,13 +8,20 @@
 //
 //   RP2040 / RP2350 (arduino-pico)  gpio_set_function(): SPI <-> NULL
 //   AVR (ATmega328P/32U4/2560 ...)  DDR bit: with the SPI enabled as master,
-//                                   the direction of SCK and MOSI is the
-//                                   user's (ATmega328P datasheet, "Alternate
-//                                   Port Functions"); the value is the SPI's
+//   megaAVR (Nano Every, ATmega4809) the direction of SCK and MOSI is the
+//                                   user's (ATmega328P / ATmega4809
+//                                   datasheets, SPI pin overrides); the
+//                                   value is the SPI's
 //   SAMD21 / SAMD51                 PINCFG.PMUXEN via pinMode() / pinPeripheral()
 //   ESP32 family (arduino-esp32)    GPIO matrix: the pin's out-select register
 //                                   is saved, the pin made an input, and the
 //                                   saved routing written back
+//   Teensy 3.x / LC / 4.x           the pin's mux (and on 4.x pad) register is
+//                                   saved, pinMode(INPUT) switches the pin to
+//                                   GPIO, and the saved registers are written
+//                                   back - what SPI.begin() itself writes
+//   STM32 (stm32duino)              pinMode(INPUT) <-> pinmap_pinout() with the
+//                                   core's SPI pin map, as the SPI driver does
 //
 // Every other core compiles the release to nothing and falls back to SPI mode
 // 3 (see begin()), which removes the SCK half of the fight while the I2C bus
@@ -23,7 +30,16 @@
   #define ICM_SPI_PIN_RELEASE 1
   #define ICM_REL_RP 1
   #include <hardware/gpio.h>
-#elif defined(ARDUINO_ARCH_AVR)
+#elif defined(TEENSYDUINO) && defined(__arm__)
+  // Before the AVR test: the Teensy platform defines ARDUINO_ARCH_AVR too.
+  #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_TEENSY 1
+#elif defined(ARDUINO_ARCH_STM32)
+  #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_STM32 1
+  #include "pinmap.h"
+  #include "PeripheralPins.h"
+#elif defined(ARDUINO_ARCH_AVR) || defined(ARDUINO_ARCH_MEGAAVR)
   #define ICM_SPI_PIN_RELEASE 1
   #define ICM_REL_AVR 1
 #elif defined(ARDUINO_ARCH_SAMD)
@@ -244,7 +260,7 @@ void ICM42688P::applyInterfaceConfig() {
 //                       which is harmless now that nothing drives against it
 //   7. endTransaction()
 //
-// AVR, SAMD and ESP32 have no pull-down to hold an idle-LOW SCK, so a released
+// The other backends have no pull-down to rely on to hold an idle-LOW SCK, so a released
 // SCK would float in step 3 and a float followed by the SPI snapping it to its
 // idle level can be a clock edge. There the pins are taken BEFORE CS falls and
 // released AFTER CS rises: the SPI drives SCK at its idle level the whole time
@@ -285,6 +301,16 @@ void ICM42688P::relTakePins() {
 #elif defined(ICM_REL_AVR)
   pinMode(_relSck, OUTPUT);       // value comes from the SPI, not PORT
   pinMode(_relMosi, OUTPUT);
+#elif defined(ICM_REL_TEENSY)
+  *portConfigRegister(_relSck)  = _relSckCfg;     // mux back to the SPI
+  *portConfigRegister(_relMosi) = _relMosiCfg;
+  #if defined(__IMXRT1062__)
+  *portControlRegister(_relSck)  = _relSckPad;    // and its pad settings
+  *portControlRegister(_relMosi) = _relMosiPad;
+  #endif
+#elif defined(ICM_REL_STM32)
+  pinmap_pinout(digitalPinToPinName(_relSck), PinMap_SPI_SCLK);
+  pinmap_pinout(digitalPinToPinName(_relMosi), PinMap_SPI_MOSI);
 #elif defined(ICM_REL_SAMD)
   pinPeripheral(_relSck, g_APinDescription[_relSck].ulPinType);
   pinPeripheral(_relMosi, g_APinDescription[_relMosi].ulPinType);
@@ -305,8 +331,10 @@ void ICM42688P::relReleasePins() {
 #if defined(ICM_REL_RP)
   gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
   gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
-#elif defined(ICM_REL_AVR) || defined(ICM_REL_SAMD)
-  pinMode(_relSck, INPUT);        // also clears PORT, so no pull-up either
+#elif defined(ICM_REL_AVR) || defined(ICM_REL_SAMD) || defined(ICM_REL_TEENSY) || defined(ICM_REL_STM32)
+  // AVR/SAMD: input, no pull-up. Teensy: mux to GPIO, input, no pull.
+  // STM32: GPIO input, no pull - the alternate function is no longer driven.
+  pinMode(_relSck, INPUT);
   pinMode(_relMosi, INPUT);
 #elif defined(ICM_REL_ESP32)
   gpio_set_direction((gpio_num_t)_relSck, GPIO_MODE_INPUT);   // unroutes the pin
@@ -360,6 +388,29 @@ bool ICM42688P::spiPinsValid(int8_t sck, int8_t mosi) {
 #elif defined(ICM_REL_AVR)
   // Only the hardware SPI's own, fixed pins.
   return _spi == &SPI && sck == (int8_t)SCK && mosi == (int8_t)MOSI;
+#elif defined(ICM_REL_TEENSY)
+  // Both pins must currently be muxed to a peripheral, not to GPIO: that is
+  // what the bus's begin() leaves on its SCK and MOSI, and it keeps release
+  // away from a pin the sketch uses as plain I/O.
+  if (sck >= (int8_t)CORE_NUM_DIGITAL || mosi >= (int8_t)CORE_NUM_DIGITAL) return false;
+  #if defined(__IMXRT1062__)
+  // IMXRT1062 mux: ALT5 is GPIO.
+  return (*portConfigRegister(sck) & 7) != 5 && (*portConfigRegister(mosi) & 7) != 5;
+  #else
+  // Kinetis PORTx_PCRn.MUX: 0 = disabled/analog, 1 = GPIO, >= 2 peripherals.
+  return ((*portConfigRegister(sck) >> 8) & 7) >= 2 && ((*portConfigRegister(mosi) >> 8) & 7) >= 2;
+  #endif
+#elif defined(ICM_REL_STM32)
+  // Pins that can carry this signal at all, and are in alternate-function
+  // mode right now (left there by the bus's begin()).
+  {
+    const PinName ps = digitalPinToPinName(sck), pm = digitalPinToPinName(mosi);
+    if (ps == NC || pm == NC) return false;
+    if (pinmap_find_function(ps, PinMap_SPI_SCLK) == (uint32_t)NC) return false;
+    if (pinmap_find_function(pm, PinMap_SPI_MOSI) == (uint32_t)NC) return false;
+    return LL_GPIO_GetPinMode(get_GPIO_Port(STM_PORT(ps)), STM_LL_GPIO_PIN(ps)) == LL_GPIO_MODE_ALTERNATE &&
+           LL_GPIO_GetPinMode(get_GPIO_Port(STM_PORT(pm)), STM_LL_GPIO_PIN(pm)) == LL_GPIO_MODE_ALTERNATE;
+  }
 #elif defined(ICM_REL_SAMD)
   if (sck >= (int8_t)PINS_COUNT || mosi >= (int8_t)PINS_COUNT) return false;
   const EPioType ts = g_APinDescription[sck].ulPinType;
@@ -394,8 +445,14 @@ bool ICM42688P::detectSpiPins(int8_t &sck, int8_t &mosi) {
     if ((pin & 3) == 3) { foundMosi = (int8_t)pin; nMosi++; }
   }
   if (nSck == 1 && nMosi == 1) { sck = foundSck; mosi = foundMosi; }
-#elif defined(ICM_REL_AVR)
+#elif defined(ICM_REL_AVR) || defined(ICM_REL_TEENSY)
+  // The core's default SPI pins. If the sketch moved SPI elsewhere (Teensy
+  // setSCK()), these are not muxed to it and spiPinsValid() refuses them.
   if (_spi == &SPI) { sck = (int8_t)SCK; mosi = (int8_t)MOSI; }
+#elif defined(ICM_REL_STM32)
+  #if defined(PIN_SPI_SCK) && defined(PIN_SPI_MOSI)
+  if (_spi == &SPI) { sck = (int8_t)PIN_SPI_SCK; mosi = (int8_t)PIN_SPI_MOSI; }
+  #endif
 #elif defined(ICM_REL_SAMD)
   if (_spi == &SPI) { sck = (int8_t)PIN_SPI_SCK; mosi = (int8_t)PIN_SPI_MOSI; }
   #if SPI_INTERFACES_COUNT > 1 && defined(PIN_SPI1_SCK) && defined(PIN_SPI1_MOSI)
@@ -450,6 +507,14 @@ void ICM42688P::activateSpiPinRelease() {
   // The routing to give back on every transaction.
   _relSckCfg  = REG_READ(ICM_ESP_OUT_CFG(_relSck));
   _relMosiCfg = REG_READ(ICM_ESP_OUT_CFG(_relMosi));
+#elif defined(ICM_REL_TEENSY)
+  // The mux (and pad) values the bus's begin() wrote, to write back.
+  _relSckCfg  = *portConfigRegister(_relSck);
+  _relMosiCfg = *portConfigRegister(_relMosi);
+  #if defined(__IMXRT1062__)
+  _relSckPad  = *portControlRegister(_relSck);
+  _relMosiPad = *portControlRegister(_relMosi);
+  #endif
 #endif
   relReleasePins();
   _relActive = true;

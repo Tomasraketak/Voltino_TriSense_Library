@@ -101,6 +101,49 @@ jobs:
               examples/RawDataI2C
               examples/SimpleFusion
 
+          # --- The cores that got their own SPI pin release backend (README,
+          #     "SPI pin release"). Each one reaches into its core's pin mux,
+          #     so a core update that renames something shows up here. ---
+          - name: Teensy 4.1
+            fqbn: teensy:avr:teensy41
+            platforms: |
+              - name: teensy:avr
+                source-url: https://www.pjrc.com/teensy/package_teensy_index.json
+            libraries: |
+              - source-path: ./
+            sketch-paths: |
+              examples/AdvancedFusion
+              examples/CustomPins
+              examples/LowPower
+              examples/RawDataI2C
+              examples/SimpleFusion
+
+          - name: STM32 Nucleo-F411RE
+            fqbn: STMicroelectronics:stm32:Nucleo_64:pnum=NUCLEO_F411RE
+            platforms: |
+              - name: STMicroelectronics:stm32
+                source-url: https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json
+            libraries: |
+              - source-path: ./
+            sketch-paths: |
+              examples/AdvancedFusion
+              examples/CustomPins
+              examples/LowPower
+              examples/RawDataI2C
+              examples/SimpleFusion
+
+          - name: Arduino Nano Every (megaAVR)
+            fqbn: arduino:megaavr:nona4809
+            platforms: |
+              - name: arduino:megaavr
+            libraries: |
+              - source-path: ./
+            sketch-paths: |
+              examples/CustomPins
+              examples/LowPower
+              examples/RawDataI2C
+              examples/SimpleFusion
+
     steps:
       - uses: actions/checkout@v4
 
