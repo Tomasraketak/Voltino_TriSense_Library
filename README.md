@@ -634,7 +634,7 @@ See [`examples/LowPower`](examples/LowPower/LowPower.ino).
 
 | Method | Description |
 |--------|-------------|
-| `beginAll(mode, csPin, freq, wire)` | Initialize all hardware (Hybrid or I2C-only). `wire` selects the shared I2C bus (default `Wire`) |
+| `beginAll(mode, csPin, freq, wire, spi)` | Initialize all hardware (Hybrid or I2C-only). `wire` selects the shared I2C bus (default `Wire`), `spi` the IMU's SPI bus in Hybrid mode (default `SPI`; e.g. `SPI1`) |
 | `beginAll(mode, config, csPin, freq, wire)` | Same, with magnetometer / barometer / IMU rates, SPI pin-release pins and SPI mode from a `TriSenseConfig` |
 | `sleep()` / `wake()` | Put all three sensors to sleep / restore their previous configuration (see [Low-power operation](#low-power-operation)) |
 | `isSleeping()` | True between `sleep()` and `wake()` |
@@ -659,7 +659,8 @@ See [`examples/LowPower`](examples/LowPower/LowPower.ino).
 | `begin(busType, csPin, freq, i2cAddr, sck, miso, mosi)` | Full initialization with pin mapping |
 | `beginI2C(freq, addr, sda, scl)` | I2C-specific init |
 | `beginSPI(csPin, freq, sck, miso, mosi)` | SPI-specific init |
-| `setSpiPinRelease(sck, mosi)` | Release SCK/MOSI between transactions (RP2040/RP2350; `-1` = off). Returns `false` where unsupported |
+| `setSPI(spi)` / `getSPI()` | SPI bus for `BUS_SPI` (default `SPI`; e.g. `SPI1`). Call before `begin()` |
+| `setSpiPinRelease(sck, mosi)` | Release SCK/MOSI between transactions (RP2040/RP2350, AVR, SAMD, ESP32; `-1` = off). Returns `false` where unsupported |
 | `isSpiPinReleaseActive()` | True if SCK/MOSI are currently released between transactions |
 | `setSpiMode(mode)` / `getSpiMode()` | `SPI_MODE0` (default with pin release) or `SPI_MODE3` (default without) |
 | `sleep()` / `wake()` / `isSleeping()` | Accel + gyro off / back on with the previous configuration |

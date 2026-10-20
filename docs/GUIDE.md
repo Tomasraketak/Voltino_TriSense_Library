@@ -77,6 +77,21 @@ Every I2C device on the module shares one bus, so it is selected once:
 sensor.beginAll(MODE_HYBRID, 5, 10000000, Wire1);   // module wired to Wire1
 ```
 
+### Choosing the SPI bus
+
+The IMU's SPI bus is picked the same way, as the last argument (default `SPI`):
+
+```cpp
+// RP2040 / RP2350: SPI1 on GPIO 10/11/12
+SPI1.setSCK(10); SPI1.setTX(11); SPI1.setRX(12);
+sensor.beginAll(MODE_HYBRID, 5, 10000000, Wire, SPI1);
+```
+
+or `sensor.imu.setSPI(SPI1)` before `imu.begin()`. SPI pin release follows the
+bus: it releases that bus's SCK and MOSI. The bus is the IMU's alone (see
+[§2](#the-spi-bus-is-the-imus-alone)), so a second SPI device goes on the
+other bus.
+
 ### Remapping pins
 
 On cores that support it, configure the pins **before** `beginAll()`, which calls

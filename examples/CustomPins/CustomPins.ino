@@ -8,10 +8,12 @@
  * e.g. on a flight computer / custom PCB.
  *
  * Pin remapping is only possible on cores that support it:
- *   - RP2040 / RP2350 (Arduino-Pico core): SPI.setSCK()/setTX()/setRX() and
- *     Wire.setSDA()/setSCL() must be called BEFORE SPI.begin()/Wire.begin().
- *     TriSense::beginAll() calls SPI.begin()/Wire.begin() internally without
- *     pin arguments, so it automatically picks up the pins configured here.
+ *   - RP2040 / RP2350 (Arduino-Pico core): every pin belongs to one fixed
+ *     SPI block and one fixed I2C block, so the example picks SPI or SPI1 and
+ *     Wire or Wire1 from the pins below by itself - any valid SCK/TX/RX and
+ *     SDA/SCL set works, on either block. setSCK()/setTX()/setRX() and
+ *     setSDA()/setSCL() are called BEFORE begin(); beginAll() then starts
+ *     both buses without pin arguments and keeps the pins configured here.
  *   - ESP32: I2C pins can be pre-configured the same way via Wire.setPins().
  *     The SPIClass has no persistent "set pins then begin" API though, so the
  *     ICM-42688-P must be initialized directly via sensor.imu.begin(), passing
@@ -30,9 +32,10 @@
  *   - getMagHeadingDegrees() -> tilt-compensated magnetometer-only heading
  *   - fifoOverflowed()      -> detect dropped IMU packets
  *   - imu.setSpiPinRelease() -> park SCK/MOSI as inputs between IMU
- *                               transactions (RP2040/RP2350). Needed on the
- *                               TriSense Pro, whose level shifter drives those
- *                               pins while CS is HIGH - see README.
+ *                               transactions (RP2040/RP2350, AVR, SAMD, ESP32),
+ *                               on whichever SPI bus the module is on. Needed
+ *                               on the TriSense Pro, whose level shifter drives
+ *                               those pins while CS is HIGH - see README.
  */
 
 #include <Arduino.h>
@@ -44,10 +47,15 @@
 // EDIT THESE FOR YOUR WIRING
 // ---------------------------------------------------------------------------
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
+  // Any SCK/TX/RX trio of ONE block: SPI0 is GPIO 0-7 and 16-23, SPI1 is
+  // GPIO 8-15 and 24-29 (SCK = n % 4 == 2, TX = 3, RX = 0). E.g. SPI1:
+  // SCK 10, MOSI 11, MISO 12.
   #define TRISENSE_SCK   2   // SPI0 SCK
   #define TRISENSE_MOSI  3   // SPI0 TX
   #define TRISENSE_MISO  4   // SPI0 RX
-  #define TRISENSE_CS    5   // ICM-42688-P chip select
+  #define TRISENSE_CS    5   // ICM-42688-P chip select (any GPIO)
+  // Any SDA/SCL pair of ONE block: I2C0 SDA on GPIO 0, 4, 8, ..., I2C1 SDA
+  // on GPIO 2, 6, 10, ... (SCL is SDA + 1).
   #define TRISENSE_SDA   16  // I2C SDA (AK09918C + BMP580)
   #define TRISENSE_SCL   17  // I2C SCL (AK09918C + BMP580)
 #elif defined(ESP32)
@@ -70,25 +78,31 @@ unsigned long lastPrintTime = 0;
 
 bool beginWithCustomPins() {
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
-  // Route I2C (AK09918C + BMP580) to the custom pins.
-  Wire.setSDA(TRISENSE_SDA);
-  Wire.setSCL(TRISENSE_SCL);
+  // The pins decide the blocks: bit 3 of the SCK pin number is the SPI
+  // block, bit 1 of the SDA pin number the I2C block.
+  TriSenseSPIClass &spi = ((TRISENSE_SCK >> 3) & 1) ? SPI1 : SPI;
+  TwoWire &wire = ((TRISENSE_SDA >> 1) & 1) ? Wire1 : Wire;
 
-  // Route SPI0 (ICM-42688-P) to the custom pins.
-  SPI.setSCK(TRISENSE_SCK);
-  SPI.setTX(TRISENSE_MOSI);
-  SPI.setRX(TRISENSE_MISO);
+  // Route I2C (AK09918C + BMP580) to the custom pins.
+  wire.setSDA(TRISENSE_SDA);
+  wire.setSCL(TRISENSE_SCL);
+
+  // Route the SPI bus (ICM-42688-P) to the custom pins.
+  spi.setSCK(TRISENSE_SCK);
+  spi.setTX(TRISENSE_MOSI);
+  spi.setRX(TRISENSE_MISO);
 
   // Tell the IMU driver which pins are SCK and MOSI so it can release them
-  // between transactions. beginAll() would usually work them out by itself
-  // after SPI.begin(); naming them here makes it explicit. Pass -1, -1 to turn
-  // the release off (e.g. if another SPI device must share these pins - which
-  // the TriSense Pro does not allow anyway, see docs/GUIDE.md).
+  // between transactions. beginAll() would work them out by itself after
+  // spi.begin(); naming them here makes it explicit, and they are checked
+  // against the bus handed to beginAll(). Pass -1, -1 to turn the release
+  // off (e.g. if another SPI device must share these pins - which the
+  // TriSense Pro does not allow anyway, see docs/GUIDE.md).
   sensor.imu.setSpiPinRelease(TRISENSE_SCK, TRISENSE_MOSI);
 
-  // beginAll() internally calls Wire.begin()/SPI.begin() with no pin
-  // arguments, so the pin mapping configured above is kept.
-  return sensor.beginAll(MODE_HYBRID, TRISENSE_CS, 10000000);
+  // beginAll() calls wire.begin()/spi.begin() with no pin arguments, so the
+  // pin mapping configured above is kept.
+  return sensor.beginAll(MODE_HYBRID, TRISENSE_CS, 10000000, wire, spi);
 
 #elif defined(ESP32)
   // Route I2C (AK09918C + BMP580) to the custom pins. Must happen before

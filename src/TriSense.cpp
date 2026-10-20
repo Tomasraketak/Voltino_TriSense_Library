@@ -4,16 +4,16 @@ TriSense::TriSense() {
   memset(&_last, 0, sizeof(_last));
 }
 
-bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
+bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi) {
   TriSenseConfig defaults;
-  return beginAllImpl(mode, defaults, spiCsPin, spiFreq, wire);
+  return beginAllImpl(mode, defaults, spiCsPin, spiFreq, wire, spi);
 }
 
-bool TriSense::beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
-  return beginAllImpl(mode, config, spiCsPin, spiFreq, wire);
+bool TriSense::beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi) {
+  return beginAllImpl(mode, config, spiCsPin, spiFreq, wire, spi);
 }
 
-bool TriSense::beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
+bool TriSense::beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi) {
   _mode = mode;
   _wire = &wire;
   _sleeping = false;
@@ -30,6 +30,9 @@ bool TriSense::beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uin
     if (!imu.begin(BUS_I2C)) return false;
     imu.setODR(config.imuOdr ? config.imuOdr : DEFAULT_IMU_ODR); 
   } else {
+    // The bus first: pins named below belong to it. SPI, the default, is not
+    // pushed, so a sketch that chose a bus with imu.setSPI() keeps it.
+    if (&spi != &SPI) imu.setSPI(spi);
     // Explicit pins switch SPI pin release on (or, both -1 with a sketch that
     // already called imu.setSpiPinRelease(), leave that choice alone).
     if (config.spiSckPin >= 0 && config.spiMosiPin >= 0) {
@@ -83,8 +86,9 @@ bool TriSense::wake() {
 
 bool TriSense::beginBMP(uint8_t addr, TwoWire &wire) { _wire = &wire; return bmp.begin(addr, wire); }
 bool TriSense::beginMAG(TwoWire &wire) { _wire = &wire; return mag.begin(AK_ODR_100HZ, wire); }
-bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq, TwoWire &wire) {
+bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq, TwoWire &wire, TriSenseSPIClass &spi) {
   if (busType == BUS_I2C) { _wire = &wire; imu.setWire(wire); }
+  else if (&spi != &SPI) imu.setSPI(spi);   // SPI = keep a bus set via imu.setSPI()
   return imu.begin(busType, csPin, freq);
 }
 

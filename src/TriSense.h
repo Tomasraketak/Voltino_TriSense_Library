@@ -167,15 +167,21 @@ public:
   // primary bus. On cores that support pin remapping, call wire.setSDA()/setSCL()
   // (or wire.setPins() on ESP32) BEFORE this - beginAll() calls wire.begin()
   // without pin arguments and therefore keeps whatever mapping you configured.
-  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire);
+  //
+  // `spi` picks the SPI bus for the IMU in MODE_HYBRID - SPI (default), SPI1,
+  // ... - the same way: set that bus's pins first (spi.setSCK()/setTX()/setRX()
+  // on RP2040/RP2350), and beginAll() calls spi.begin() for you. The bus is
+  // the IMU's alone: the module drives SCK and MOSI whenever the IMU is not
+  // selected, so nothing else can share it.
+  bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire, TriSenseSPIClass &spi = SPI);
 
   // Same, with the sensor rates (and the SPI pin release pins) taken from
   // `config` instead of the built-in defaults.
-  bool beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire);
+  bool beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire, TriSenseSPIClass &spi = SPI);
   
   bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);
   bool beginMAG(TwoWire &wire = Wire);
-  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000, TwoWire &wire = Wire);
+  bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000, TwoWire &wire = Wire, TriSenseSPIClass &spi = SPI);
 
   // The I2C bus every sensor on the module is attached to.
   TwoWire& getWire() { return *_wire; }
@@ -226,7 +232,7 @@ private:
   bool _sleeping = false;
   uint8_t _magModeBeforeSleep = AK_ODR_100HZ;
 
-  bool beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire);
+  bool beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire, TriSenseSPIClass &spi);
 
   // Last known good reading of each block, plus when it was taken.
   TriSenseDataSnapshot _last;

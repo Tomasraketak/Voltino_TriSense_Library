@@ -68,6 +68,14 @@ void ICM42688P::setDebug(bool enable) { _debug = enable; }
 
 void ICM42688P::setWire(TwoWire &wire) { _wire = &wire; }
 
+void ICM42688P::setSPI(TriSenseSPIClass &spi) {
+  if (&spi == _spi) return;
+  deactivateSpiPinRelease();     // Hand the old bus's pins back first
+  _spi = &spi;
+  _spiStarted = false;           // begin() starts the new bus
+  if (!_relConfigured) { _relSck = -1; _relMosi = -1; }
+}
+
 bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
   return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
 }
@@ -105,19 +113,19 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
     
     #if defined(ESP32)
       if (sckSclPin != -1 && misoSdaPin != -1 && mosiPin != -1) {
-        SPI.begin(sckSclPin, misoSdaPin, mosiPin, _csPin);
+        _spi->begin(sckSclPin, misoSdaPin, mosiPin, _csPin);
       } else {
-        SPI.begin();
+        _spi->begin();
       }
     #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
       if (sckSclPin != -1 && misoSdaPin != -1 && mosiPin != -1) {
-        SPI.setSCK(sckSclPin);
-        SPI.setRX(misoSdaPin);
-        SPI.setTX(mosiPin);
+        _spi->setSCK(sckSclPin);
+        _spi->setRX(misoSdaPin);
+        _spi->setTX(mosiPin);
       }
-      SPI.begin();
+      _spi->begin();
     #else
-      SPI.begin(); 
+      _spi->begin(); 
     #endif
     _spiStarted = true;
 
@@ -248,7 +256,7 @@ void ICM42688P::applyInterfaceConfig() {
 // no matter how many bytes it moves.
 
 void ICM42688P::spiSelect() {
-  SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, (ICM_SPI_MODE_T)_spiMode));
+  _spi->beginTransaction(SPISettings(_spiFreq, MSBFIRST, (ICM_SPI_MODE_T)_spiMode));
 #if defined(ICM_REL_RP)
   if (_csPin != -1) digitalWrite(_csPin, LOW);
   if (_relActive) relTakePins();
@@ -266,7 +274,7 @@ void ICM42688P::spiDeselect() {
   if (_csPin != -1) digitalWrite(_csPin, HIGH);
   if (_relActive) relReleasePins();
 #endif
-  SPI.endTransaction();
+  _spi->endTransaction();
 }
 
 // Hand SCK and MOSI to the SPI peripheral.
@@ -322,22 +330,36 @@ static int icmEspSpiHostOf(int8_t pin, int what) {
 }
 #endif
 
+#if defined(ICM_REL_RP)
+// Which RP2040/RP2350 SPI block the driver's bus object drives: 0 for SPI,
+// 1 for SPI1, -1 for a sketch's own SPIClassRP2040 instance (then only
+// explicitly named pins are used).
+static int icmRpSpiIndex(const TriSenseSPIClass *spi) {
+  if (spi == &SPI)  return 0;
+  if (spi == &SPI1) return 1;
+  return -1;
+}
+#endif
+
 // Can these two pins be released? Checked when release is armed, i.e. after
-// SPI.begin(), so on ESP32 the pins' actual routing can be checked too.
+// the bus's begin(), so on ESP32 the pins' actual routing can be checked too.
 bool ICM42688P::spiPinsValid(int8_t sck, int8_t mosi) {
   if (sck < 0 || mosi < 0 || sck == mosi) return false;
 #if defined(ICM_REL_RP)
   // GPIO function 1 (SPI) is fixed per pin: GPIO n belongs to SPI((n >> 3) & 1)
   // and n % 4 selects the signal - 0 RX, 1 CSn, 2 SCK, 3 TX. Checking against
   // that table means a wrong pin number can never route an SPI signal onto a
-  // pin that is wired to something else. The driver talks to the global SPI
-  // object, which is spi0 on arduino-pico, so both pins must be spi0's.
+  // pin that is wired to something else. Both pins must belong to one block,
+  // and to the block of the bus the driver was given, when that is known.
   if (sck >= (int8_t)NUM_BANK0_GPIOS || mosi >= (int8_t)NUM_BANK0_GPIOS) return false;
   if ((sck & 3) != 2 || (mosi & 3) != 3) return false;
-  return ((sck >> 3) & 1) == 0 && ((mosi >> 3) & 1) == 0;
+  const int block = (sck >> 3) & 1;
+  if (((mosi >> 3) & 1) != block) return false;
+  const int idx = icmRpSpiIndex(_spi);
+  return idx < 0 || idx == block;
 #elif defined(ICM_REL_AVR)
-  // Only the hardware SPI pins: on AVR they are fixed.
-  return sck == (int8_t)SCK && mosi == (int8_t)MOSI;
+  // Only the hardware SPI's own, fixed pins.
+  return _spi == &SPI && sck == (int8_t)SCK && mosi == (int8_t)MOSI;
 #elif defined(ICM_REL_SAMD)
   if (sck >= (int8_t)PINS_COUNT || mosi >= (int8_t)PINS_COUNT) return false;
   const EPioType ts = g_APinDescription[sck].ulPinType;
@@ -359,27 +381,31 @@ bool ICM42688P::detectSpiPins(int8_t &sck, int8_t &mosi) {
   sck = -1;
   mosi = -1;
 #if defined(ICM_REL_RP)
-  // After SPI.begin() the pins the core chose are the ones in SPI function.
-  // Only spi0's pins count: a second bus on spi1 is not ambiguous, but two
-  // SCK pins both muxed to spi0 would be.
+  // After the bus's begin() the pins the core chose are the ones in SPI
+  // function. Only the driver's own block counts: the other block being in
+  // use is not ambiguous, but two SCK pins muxed to the same block would be.
+  const int idx = icmRpSpiIndex(_spi);              // -1: own instance, name the pins
   int8_t foundSck = -1, foundMosi = -1;
   uint8_t nSck = 0, nMosi = 0;
-  for (uint pin = 0; pin < NUM_BANK0_GPIOS; pin++) {
+  for (uint pin = 0; idx >= 0 && pin < NUM_BANK0_GPIOS; pin++) {
     if (gpio_get_function(pin) != GPIO_FUNC_SPI) continue;
-    if ((pin >> 3) & 1) continue;                   // spi1 - not the driver's bus
+    if ((int)((pin >> 3) & 1) != idx) continue;     // the other block
     if ((pin & 3) == 2) { foundSck = (int8_t)pin; nSck++; }
     if ((pin & 3) == 3) { foundMosi = (int8_t)pin; nMosi++; }
   }
   if (nSck == 1 && nMosi == 1) { sck = foundSck; mosi = foundMosi; }
 #elif defined(ICM_REL_AVR)
-  sck = (int8_t)SCK;
-  mosi = (int8_t)MOSI;
+  if (_spi == &SPI) { sck = (int8_t)SCK; mosi = (int8_t)MOSI; }
 #elif defined(ICM_REL_SAMD)
-  sck = (int8_t)PIN_SPI_SCK;
-  mosi = (int8_t)PIN_SPI_MOSI;
+  if (_spi == &SPI) { sck = (int8_t)PIN_SPI_SCK; mosi = (int8_t)PIN_SPI_MOSI; }
+  #if SPI_INTERFACES_COUNT > 1 && defined(PIN_SPI1_SCK) && defined(PIN_SPI1_MOSI)
+  if (_spi == &SPI1) { sck = (int8_t)PIN_SPI1_SCK; mosi = (int8_t)PIN_SPI1_MOSI; }
+  #endif
 #elif defined(ICM_REL_ESP32)
-  // SPI.begin() may have been given any pins, so look for the one pin routed
-  // to an SPI clock and the one routed to that host's data-out.
+  // The bus's begin() may have been given any pins, and SPIClass does not
+  // say which host it is, so look for the one pin routed to an SPI clock and
+  // the one routed to that host's data-out. With two SPI buses running this
+  // is ambiguous and the pins have to be named.
   uint8_t nSck = 0, nMosi = 0;
   int8_t foundSck = -1, foundMosi = -1;
   for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
@@ -514,8 +540,8 @@ bool ICM42688P::isSleeping() { return _sleeping; }
 void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
     spiSelect();
-    SPI.transfer(startReg | 0x80); 
-    for(size_t i=0; i<len; i++) buffer[i] = SPI.transfer(0x00);
+    _spi->transfer(startReg | 0x80); 
+    for(size_t i=0; i<len; i++) buffer[i] = _spi->transfer(0x00);
     spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
@@ -529,8 +555,8 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
 void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
   if (_bus == BUS_SPI) {
     spiSelect();
-    SPI.transfer(reg & 0x7F); 
-    SPI.transfer(data);
+    _spi->transfer(reg & 0x7F); 
+    _spi->transfer(data);
     spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
@@ -544,8 +570,8 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
   uint8_t data = 0;
   if (_bus == BUS_SPI) {
     spiSelect();
-    SPI.transfer(reg | 0x80); 
-    data = SPI.transfer(0x00);
+    _spi->transfer(reg | 0x80); 
+    data = _spi->transfer(0x00);
     spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);

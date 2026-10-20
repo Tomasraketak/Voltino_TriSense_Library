@@ -3,6 +3,15 @@
 #include <Wire.h>
 #include <SPI.h>
 
+// The concrete class of the core's SPI objects - SPIClass on AVR/ESP32,
+// SPIClassRP2040 on arduino-pico, SPIClassSAMD on SAMD, and so on. Taken from
+// the global SPI object itself, so every core gets its own type and the
+// driver can call that core's SPI methods (setSCK() on RP2040, begin(pins) on
+// ESP32) on whichever bus the sketch hands it - SPI, SPI1, ...
+template <typename T> struct TriSenseNoRef { typedef T type; };
+template <typename T> struct TriSenseNoRef<T &> { typedef T type; };
+typedef TriSenseNoRef<decltype(SPI)>::type TriSenseSPIClass;
+
 // Register definitions
 #define ICM42688_REG_DEVICE_CONFIG 0x11
 #define ICM42688_REG_DRIVE_CONFIG  0x13
@@ -197,6 +206,13 @@ public:
   bool wake();
   bool isSleeping();
 
+  // Selects the SPI bus for BUS_SPI mode: SPI (default), SPI1, ... Must be
+  // called BEFORE begin(). On RP2040/RP2350 set that bus's pins with its own
+  // setSCK()/setTX()/setRX() first, or pass them to begin(). Ignored in
+  // BUS_I2C mode. TriSense::beginAll() takes the bus as its last argument.
+  void setSPI(TriSenseSPIClass &spi);
+  TriSenseSPIClass &getSPI() { return *_spi; }
+
   // Selects the I2C bus for BUS_I2C mode. Must be called BEFORE begin().
   // Ignored in BUS_SPI mode. The whole TriSense module shares one bus, so
   // TriSense::beginAll() sets this for you.
@@ -330,6 +346,7 @@ public:
 
 private:
   TwoWire* _wire = &Wire;
+  TriSenseSPIClass* _spi = &SPI;
   ICM_BUS _bus;
   int8_t _csPin;
   uint8_t _i2cAddr;
