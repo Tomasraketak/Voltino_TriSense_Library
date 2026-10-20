@@ -1,16 +1,43 @@
 #include "ICM42688P_voltino.h"
 
-// SPI pin release needs direct control of the GPIO function select, which only
-// the arduino-pico core (earlephilhower) exposes through the Pico SDK. On every
-// other core the release calls compile to nothing.
+// SPI pin release (see setSpiPinRelease()) needs a way to stop the MCU from
+// driving SCK and MOSI between transactions and to hand them back to the SPI
+// peripheral afterwards. There is no Arduino API for that - pinMode() does not
+// know about peripheral pin muxing on most cores - so each architecture gets
+// its own small backend, built on what that core itself uses:
 //
-// ESP32 could do the same through the GPIO matrix (pinMatrixOutDetach() and a
-// re-attach to the SPI peripheral's output signal), but the signal index and
-// the peripheral-manager rules differ between core 2.x and 3.x, so it is left
-// as a no-op there rather than shipped untested. See README, "SPI pin release".
+//   RP2040 / RP2350 (arduino-pico)  gpio_set_function(): SPI <-> NULL
+//   AVR (ATmega328P/32U4/2560 ...)  DDR bit: with the SPI enabled as master,
+//                                   the direction of SCK and MOSI is the
+//                                   user's (ATmega328P datasheet, "Alternate
+//                                   Port Functions"); the value is the SPI's
+//   SAMD21 / SAMD51                 PINCFG.PMUXEN via pinMode() / pinPeripheral()
+//   ESP32 family (arduino-esp32)    GPIO matrix: the pin's out-select register
+//                                   is saved, the pin made an input, and the
+//                                   saved routing written back
+//
+// Every other core compiles the release to nothing and falls back to SPI mode
+// 3 (see begin()), which removes the SCK half of the fight while the I2C bus
+// is idle. Sketches never notice either way.
 #if (defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)) && !defined(ARDUINO_ARCH_MBED)
   #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_RP 1
   #include <hardware/gpio.h>
+#elif defined(ARDUINO_ARCH_AVR)
+  #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_AVR 1
+#elif defined(ARDUINO_ARCH_SAMD)
+  #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_SAMD 1
+  #include "wiring_private.h"
+#elif defined(ESP32)
+  #define ICM_SPI_PIN_RELEASE 1
+  #define ICM_REL_ESP32 1
+  #include "driver/gpio.h"
+  #include "soc/gpio_reg.h"
+  #include "soc/soc_caps.h"
+  #include "soc/spi_periph.h"
+  #define ICM_ESP_OUT_CFG(pin) (GPIO_FUNC0_OUT_SEL_CFG_REG + 4u * (uint32_t)(pin))
 #endif
 
 // ArduinoCore-API based cores (arduino-pico, SAMD, mbed, Renesas) take an
@@ -106,6 +133,14 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
     }
     activateSpiPinRelease();
 
+    // Where SCK and MOSI cannot be released (no backend for this core, or the
+    // pins are unknown) at least idle SCK HIGH, the level the module drives it
+    // to whenever the I2C bus is idle: SPI mode 3. That removes the SCK half of
+    // the fight except during I2C traffic. The IMU takes mode 0 and mode 3
+    // alike (DS-000347, DEVICE_CONFIG.SPI_MODE), so the data is unchanged. A
+    // mode set with setSpiMode() is never overridden.
+    if (!_relActive && !_spiModeSet) _spiMode = (uint8_t)SPI_MODE3;
+
   } else {
     #if defined(ESP32) 
       if (sckSclPin != -1 && misoSdaPin != -1) {
@@ -188,7 +223,10 @@ void ICM42688P::applyInterfaceConfig() {
 // ---------------------------------------------------------------------------
 //
 // The order matters on the TriSense Pro, where the SN74LVC2T45 in the SCK/MOSI
-// path takes its direction from CS:
+// path takes its direction from CS. On RP2040/RP2350, where switching a pin
+// between SPI and high-impedance costs two register writes and the SCK idle
+// level is held by a pull (applySckIdlePull()), the MCU never drives against
+// the shifter at all:
 //   1. beginTransaction()
 //   2. CS LOW         - the shifter turns, the connector side becomes an input
 //   3. SCK/MOSI -> SPI function, now driving into an input
@@ -197,79 +235,174 @@ void ICM42688P::applyInterfaceConfig() {
 //   6. CS HIGH        - the shifter turns back and drives the pins again,
 //                       which is harmless now that nothing drives against it
 //   7. endTransaction()
-// A FIFO burst is a single transaction, so it pays for one attach/release pair
+//
+// AVR, SAMD and ESP32 have no pull-down to hold an idle-LOW SCK, so a released
+// SCK would float in step 3 and a float followed by the SPI snapping it to its
+// idle level can be a clock edge. There the pins are taken BEFORE CS falls and
+// released AFTER CS rises: the SPI drives SCK at its idle level the whole time
+// CS is low, and the two drivers overlap only for the few microseconds between
+// the pin switch and the CS edge - a duty cycle of well under 1 %, instead of
+// the near-100 % of a pin that is never released.
+//
+// A FIFO burst is a single transaction, so it pays for one take/release pair
 // no matter how many bytes it moves.
 
 void ICM42688P::spiSelect() {
   SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, (ICM_SPI_MODE_T)_spiMode));
+#if defined(ICM_REL_RP)
   if (_csPin != -1) digitalWrite(_csPin, LOW);
-#if defined(ICM_SPI_PIN_RELEASE)
-  if (_relActive) {
-    gpio_set_function((uint)_relSck, GPIO_FUNC_SPI);
-    gpio_set_function((uint)_relMosi, GPIO_FUNC_SPI);
-  }
+  if (_relActive) relTakePins();
+#else
+  if (_relActive) relTakePins();
+  if (_csPin != -1) digitalWrite(_csPin, LOW);
 #endif
 }
 
 void ICM42688P::spiDeselect() {
-#if defined(ICM_SPI_PIN_RELEASE)
-  if (_relActive) {
-    gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
-    gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
-  }
-#endif
+#if defined(ICM_REL_RP)
+  if (_relActive) relReleasePins();
   if (_csPin != -1) digitalWrite(_csPin, HIGH);
+#else
+  if (_csPin != -1) digitalWrite(_csPin, HIGH);
+  if (_relActive) relReleasePins();
+#endif
   SPI.endTransaction();
 }
 
-// On RP2040/RP2350 GPIO function 1 (SPI) is fixed per pin: GPIO n belongs to
-// SPI((n >> 3) & 1), and n % 4 selects the signal - 0 RX, 1 CSn, 2 SCK, 3 TX.
-// Checking against that table means a wrong pin number can never route an SPI
-// signal onto a pin that is wired to something else.
+// Hand SCK and MOSI to the SPI peripheral.
+void ICM42688P::relTakePins() {
+#if defined(ICM_REL_RP)
+  gpio_set_function((uint)_relSck, GPIO_FUNC_SPI);
+  gpio_set_function((uint)_relMosi, GPIO_FUNC_SPI);
+#elif defined(ICM_REL_AVR)
+  pinMode(_relSck, OUTPUT);       // value comes from the SPI, not PORT
+  pinMode(_relMosi, OUTPUT);
+#elif defined(ICM_REL_SAMD)
+  pinPeripheral(_relSck, g_APinDescription[_relSck].ulPinType);
+  pinPeripheral(_relMosi, g_APinDescription[_relMosi].ulPinType);
+#elif defined(ICM_REL_ESP32)
+  // gpio_set_direction(OUTPUT) briefly routes the plain GPIO latch to the pin
+  // before the saved SPI routing is written back, so the latch is set to the
+  // SPI idle level first: no edge on SCK in that window.
+  gpio_set_level((gpio_num_t)_relSck, _spiMode == (uint8_t)SPI_MODE3 ? 1 : 0);
+  gpio_set_direction((gpio_num_t)_relSck, GPIO_MODE_INPUT_OUTPUT);
+  REG_WRITE(ICM_ESP_OUT_CFG(_relSck), _relSckCfg);
+  gpio_set_direction((gpio_num_t)_relMosi, GPIO_MODE_INPUT_OUTPUT);
+  REG_WRITE(ICM_ESP_OUT_CFG(_relMosi), _relMosiCfg);
+#endif
+}
+
+// Make SCK and MOSI high-impedance inputs.
+void ICM42688P::relReleasePins() {
+#if defined(ICM_REL_RP)
+  gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
+  gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
+#elif defined(ICM_REL_AVR) || defined(ICM_REL_SAMD)
+  pinMode(_relSck, INPUT);        // also clears PORT, so no pull-up either
+  pinMode(_relMosi, INPUT);
+#elif defined(ICM_REL_ESP32)
+  gpio_set_direction((gpio_num_t)_relSck, GPIO_MODE_INPUT);   // unroutes the pin
+  gpio_set_direction((gpio_num_t)_relMosi, GPIO_MODE_INPUT);
+#endif
+}
+
+#if defined(ICM_REL_ESP32)
+// The out-select field of a pin's GPIO matrix register: which peripheral
+// signal drives it. Returns the index of the SPI host whose clock (what = 0)
+// or data-out (what = 1) signal that is, or -1. Host 0 is the flash SPI and is
+// never ours.
+static int icmEspSpiHostOf(int8_t pin, int what) {
+  if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT || !GPIO_IS_VALID_OUTPUT_GPIO(pin)) return -1;
+  const uint32_t sel = REG_READ(ICM_ESP_OUT_CFG(pin)) & GPIO_FUNC0_OUT_SEL_V;
+  for (int h = 1; h < SOC_SPI_PERIPH_NUM; h++) {
+    const uint32_t sig = what ? spi_periph_signal[h].spid_out : spi_periph_signal[h].spiclk_out;
+    if (sel == sig) return h;
+  }
+  return -1;
+}
+#endif
+
+// Can these two pins be released? Checked when release is armed, i.e. after
+// SPI.begin(), so on ESP32 the pins' actual routing can be checked too.
 bool ICM42688P::spiPinsValid(int8_t sck, int8_t mosi) {
-#if defined(ICM_SPI_PIN_RELEASE)
-  if (sck < 0 || mosi < 0) return false;
+  if (sck < 0 || mosi < 0 || sck == mosi) return false;
+#if defined(ICM_REL_RP)
+  // GPIO function 1 (SPI) is fixed per pin: GPIO n belongs to SPI((n >> 3) & 1)
+  // and n % 4 selects the signal - 0 RX, 1 CSn, 2 SCK, 3 TX. Checking against
+  // that table means a wrong pin number can never route an SPI signal onto a
+  // pin that is wired to something else. The driver talks to the global SPI
+  // object, which is spi0 on arduino-pico, so both pins must be spi0's.
   if (sck >= (int8_t)NUM_BANK0_GPIOS || mosi >= (int8_t)NUM_BANK0_GPIOS) return false;
   if ((sck & 3) != 2 || (mosi & 3) != 3) return false;
-  return ((sck >> 3) & 1) == ((mosi >> 3) & 1);   // Same SPI instance
+  return ((sck >> 3) & 1) == 0 && ((mosi >> 3) & 1) == 0;
+#elif defined(ICM_REL_AVR)
+  // Only the hardware SPI pins: on AVR they are fixed.
+  return sck == (int8_t)SCK && mosi == (int8_t)MOSI;
+#elif defined(ICM_REL_SAMD)
+  if (sck >= (int8_t)PINS_COUNT || mosi >= (int8_t)PINS_COUNT) return false;
+  const EPioType ts = g_APinDescription[sck].ulPinType;
+  const EPioType tm = g_APinDescription[mosi].ulPinType;
+  return (ts == PIO_SERCOM || ts == PIO_SERCOM_ALT) && (tm == PIO_SERCOM || tm == PIO_SERCOM_ALT);
+#elif defined(ICM_REL_ESP32)
+  // Both pins must currently carry the clock and data-out of the same SPI host.
+  const int h = icmEspSpiHostOf(sck, 0);
+  return h > 0 && icmEspSpiHostOf(mosi, 1) == h;
 #else
-  (void)sck; (void)mosi;
   return false;
 #endif
 }
 
-// For begin() without explicit pins: after SPI.begin() the pins the core chose
-// are the ones in SPI function. Accepted only if exactly one SCK and one TX pin
-// are found - a second SPI bus in use makes it ambiguous, and then release
+// For begin() without explicit pins: find the pins the global SPI object is
+// really using. Accepted only when that is unambiguous; otherwise release
 // stays off rather than guess. No private SPIClass state is touched.
 bool ICM42688P::detectSpiPins(int8_t &sck, int8_t &mosi) {
-#if defined(ICM_SPI_PIN_RELEASE)
+  sck = -1;
+  mosi = -1;
+#if defined(ICM_REL_RP)
+  // After SPI.begin() the pins the core chose are the ones in SPI function.
+  // Only spi0's pins count: a second bus on spi1 is not ambiguous, but two
+  // SCK pins both muxed to spi0 would be.
   int8_t foundSck = -1, foundMosi = -1;
   uint8_t nSck = 0, nMosi = 0;
   for (uint pin = 0; pin < NUM_BANK0_GPIOS; pin++) {
     if (gpio_get_function(pin) != GPIO_FUNC_SPI) continue;
+    if ((pin >> 3) & 1) continue;                   // spi1 - not the driver's bus
     if ((pin & 3) == 2) { foundSck = (int8_t)pin; nSck++; }
     if ((pin & 3) == 3) { foundMosi = (int8_t)pin; nMosi++; }
   }
-  if (nSck == 1 && nMosi == 1 && spiPinsValid(foundSck, foundMosi)) {
-    sck = foundSck;
-    mosi = foundMosi;
-    return true;
+  if (nSck == 1 && nMosi == 1) { sck = foundSck; mosi = foundMosi; }
+#elif defined(ICM_REL_AVR)
+  sck = (int8_t)SCK;
+  mosi = (int8_t)MOSI;
+#elif defined(ICM_REL_SAMD)
+  sck = (int8_t)PIN_SPI_SCK;
+  mosi = (int8_t)PIN_SPI_MOSI;
+#elif defined(ICM_REL_ESP32)
+  // SPI.begin() may have been given any pins, so look for the one pin routed
+  // to an SPI clock and the one routed to that host's data-out.
+  uint8_t nSck = 0, nMosi = 0;
+  int8_t foundSck = -1, foundMosi = -1;
+  for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
+    if (icmEspSpiHostOf((int8_t)pin, 0) > 0) { foundSck = (int8_t)pin; nSck++; }
+    if (icmEspSpiHostOf((int8_t)pin, 1) > 0) { foundMosi = (int8_t)pin; nMosi++; }
   }
-  if (_debug) Serial.println(F("ICM: SPI pins not detected - pin release off. Use setSpiPinRelease()."));
+  if (nSck == 1 && nMosi == 1) { sck = foundSck; mosi = foundMosi; }
 #endif
+  if (sck >= 0 && mosi >= 0) return true;
+  if (_debug) Serial.println(F("ICM: SPI pins not detected - pin release off. Use setSpiPinRelease()."));
   sck = -1;
   mosi = -1;
   return false;
 }
 
-// While released, SCK is held at its idle level by a pull resistor. Without
-// it, the pin floats between CS falling and the SPI function taking over (and
-// again between release and CS rising), and a float to the non-idle level
-// followed by the snap back would be a clock edge the IMU counts as a bit.
-// MOSI is only sampled on SCK edges, so its pulls are simply switched off.
+// RP2040/RP2350 only. While released, SCK is held at its idle level by a pull
+// resistor. Without it, the pin floats between CS falling and the SPI function
+// taking over (and again between release and CS rising), and a float to the
+// non-idle level followed by the snap back would be a clock edge the IMU
+// counts as a bit. MOSI is only sampled on SCK edges, so its pulls are simply
+// switched off. The other backends avoid the float by ordering instead.
 void ICM42688P::applySckIdlePull() {
-#if defined(ICM_SPI_PIN_RELEASE)
+#if defined(ICM_REL_RP)
   if (_spiMode == (uint8_t)SPI_MODE3) gpio_pull_up((uint)_relSck);
   else                                gpio_pull_down((uint)_relSck);
 #endif
@@ -279,11 +412,20 @@ void ICM42688P::activateSpiPinRelease() {
 #if defined(ICM_SPI_PIN_RELEASE)
   if (_relActive) return;
   if (!_spiStarted || _bus != BUS_SPI || _csPin < 0) return;  // CS must be ours to order it
-  if (!spiPinsValid(_relSck, _relMosi)) return;
+  if (!spiPinsValid(_relSck, _relMosi)) {
+    if (_debug && (_relSck >= 0 || _relMosi >= 0))
+      Serial.println(F("ICM: SCK/MOSI are not this SPI bus's pins - pin release off."));
+    return;
+  }
+#if defined(ICM_REL_RP)
   applySckIdlePull();
   gpio_disable_pulls((uint)_relMosi);
-  gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
-  gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
+#elif defined(ICM_REL_ESP32)
+  // The routing to give back on every transaction.
+  _relSckCfg  = REG_READ(ICM_ESP_OUT_CFG(_relSck));
+  _relMosiCfg = REG_READ(ICM_ESP_OUT_CFG(_relMosi));
+#endif
+  relReleasePins();
   _relActive = true;
 #endif
 }
@@ -291,8 +433,7 @@ void ICM42688P::activateSpiPinRelease() {
 void ICM42688P::deactivateSpiPinRelease() {
 #if defined(ICM_SPI_PIN_RELEASE)
   if (!_relActive) return;
-  gpio_set_function((uint)_relSck, GPIO_FUNC_SPI);
-  gpio_set_function((uint)_relMosi, GPIO_FUNC_SPI);
+  relTakePins();
   _relActive = false;
 #endif
 }
@@ -301,19 +442,21 @@ bool ICM42688P::setSpiPinRelease(int8_t sckPin, int8_t mosiPin) {
   _relConfigured = true;
   deactivateSpiPinRelease();   // Hand the old pins back before switching
 
-  if (!spiPinsValid(sckPin, mosiPin)) {
-    if (_debug && (sckPin >= 0 || mosiPin >= 0)) {
-      Serial.println(F("ICM: setSpiPinRelease() - unsupported core or not an SCK/TX pin pair."));
-    }
+  if (sckPin < 0 || mosiPin < 0) {
     _relSck = -1;
     _relMosi = -1;
     return false;
   }
-
   _relSck = sckPin;
   _relMosi = mosiPin;
-  activateSpiPinRelease();     // No-op until begin() has started SPI
-  return true;
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (!_spiStarted) return true;   // Armed by begin(), validated there
+  activateSpiPinRelease();
+  return _relActive;
+#else
+  if (_debug) Serial.println(F("ICM: setSpiPinRelease() - not supported on this core."));
+  return false;
+#endif
 }
 
 bool ICM42688P::isSpiPinReleaseActive() { return _relActive; }
@@ -321,6 +464,7 @@ bool ICM42688P::isSpiPinReleaseActive() { return _relActive; }
 bool ICM42688P::setSpiMode(uint8_t mode) {
   if (mode != (uint8_t)SPI_MODE0 && mode != (uint8_t)SPI_MODE3) return false;
   _spiMode = mode;
+  _spiModeSet = true;
   if (_relActive) applySckIdlePull();
   return true;
 }

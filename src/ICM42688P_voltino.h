@@ -166,19 +166,25 @@ public:
   // and parks them as high-impedance inputs the rest of the time. See README,
   // "SPI pin release".
   //
-  // RP2040 / RP2350 (arduino-pico) only; on every other core this is a no-op
-  // that returns false. Pass -1 for either pin to switch it off. May be called
-  // before or after begin(). If it is never called, begin() enables it on its
-  // own whenever the pins are known: passed to begin(), or unambiguously
-  // readable from the GPIO function registers after SPI.begin().
-  // Returns true if release is (or, before begin(), will be) active.
+  // Implemented for RP2040 / RP2350 (arduino-pico), AVR, SAMD and the ESP32
+  // family; on other cores it is a no-op that returns false, and begin() falls
+  // back to SPI mode 3 instead (see setSpiMode()). Pass -1 for either pin to
+  // switch it off. May be called before or after begin(). If it is never
+  // called, begin() enables it on its own whenever the pins are known: passed
+  // to begin(), or unambiguously found after SPI.begin() (the pin mux on
+  // RP2040/RP2350 and ESP32, the core's fixed SPI pins on AVR and SAMD).
+  // Returns true if release is active (or, before begin(), armed - the pins
+  // are checked when begin() starts SPI).
   bool setSpiPinRelease(int8_t sckPin, int8_t mosiPin);
   bool isSpiPinReleaseActive();
 
-  // SPI_MODE0 (default, as before) or SPI_MODE3 - the ICM-42688-P supports
-  // both. Mode 3 idles SCK HIGH, the same level as an idle I2C SCL, so flipping
-  // CS does not put a LOW edge onto the module's I2C bus. Returns false (and
-  // changes nothing) for any other mode. Takes effect on the next transaction.
+  // SPI_MODE0 or SPI_MODE3 - the ICM-42688-P supports both. Mode 3 idles SCK
+  // HIGH, the same level as an idle I2C SCL, so flipping CS does not put a LOW
+  // edge onto the module's I2C bus. Default: mode 0 while pin release is
+  // active, mode 3 where it is not (then an idle-HIGH SCK at least does not
+  // fight the module while the I2C bus is idle). Calling this overrides the
+  // default. Returns false (and changes nothing) for any other mode. Takes
+  // effect on the next transaction.
   bool setSpiMode(uint8_t mode);
   uint8_t getSpiMode();
 
@@ -336,6 +342,9 @@ private:
   bool _relConfigured = false;   // setSpiPinRelease() was called - no auto-detect
   bool _relActive = false;       // Pins are currently being released between transactions
   bool _spiStarted = false;
+  bool _spiModeSet = false;      // setSpiMode() was called - keep the sketch's choice
+  uint32_t _relSckCfg = 0;       // ESP32: saved GPIO matrix routing of SCK / MOSI
+  uint32_t _relMosiCfg = 0;
 
   // Remembered so wake() can put everything back.
   ICM_ACCEL_FS _accelFs;
@@ -404,6 +413,8 @@ private:
   bool spiPinsValid(int8_t sck, int8_t mosi);
   bool detectSpiPins(int8_t &sck, int8_t &mosi);
   void activateSpiPinRelease();
+  void relTakePins();
+  void relReleasePins();
   void deactivateSpiPinRelease();
   void applySckIdlePull();
 

@@ -94,10 +94,10 @@ persistent equivalent — there, initialise the IMU directly with
 `sensor.imu.begin()` and pass the SPI pins explicitly. AVR pins are fixed in
 hardware. See `examples/CustomPins`.
 
-On RP2040 / RP2350 the IMU driver also releases SCK and MOSI between
-transactions (README, *SPI pin release*). It finds the pins by itself after
-`SPI.begin()`; if you remapped SPI and want to be explicit, add
-`sensor.imu.setSpiPinRelease(2, 3);` before `beginAll()`.
+On RP2040 / RP2350, AVR, SAMD and ESP32 the IMU driver also releases SCK and
+MOSI between transactions (README, *SPI pin release*). It finds the pins by
+itself after `SPI.begin()`; if you remapped SPI and want to be explicit, add
+`sensor.imu.setSpiPinRelease(sck, mosi);` before `beginAll()`.
 
 ---
 
@@ -549,13 +549,14 @@ the module's SCK and MOSI pins whenever the IMU's CS is HIGH. If the MCU drives
 them too, the two outputs fight: 30–50 mA in total, and a multimeter on SCK or
 MOSI shows an in-between level of about 1–2 V instead of 0 V or 3.3 V.
 
-- **RP2040 / RP2350:** the driver releases the pins between transactions.
-  Check `sensor.imu.isSpiPinReleaseActive()`. If it is `false`, the pins were
-  not detected (usually because a second SPI bus is in use) — name them with
-  `sensor.imu.setSpiPinRelease(sck, mosi)`.
-- **Other cores:** pin release is not implemented. `setSpiMode(SPI_MODE3)`
-  takes away the SCK half of the fight while idle; `MODE_I2C` avoids SPI
-  altogether.
+- **RP2040 / RP2350, AVR, SAMD, ESP32:** the driver releases the pins between
+  transactions. Check `sensor.imu.isSpiPinReleaseActive()`. If it is `false`,
+  the pins were not found (on ESP32 usually because a second SPI bus is in
+  use) — name them with `sensor.imu.setSpiPinRelease(sck, mosi)`.
+- **Other cores:** pin release is not implemented; the driver switches to SPI
+  mode 3, which takes away the SCK half of the fight while the I2C bus is
+  idle. For the rest, put a 330–470 Ω resistor in series with SCK and MOSI
+  (fine at 10 MHz), or use `MODE_I2C`.
 
 ### SPI bus cannot be shared
 

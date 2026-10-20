@@ -6,7 +6,7 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
-> **New in v1.6.0:** SPI pin release on RP2040/RP2350 — removes a 30–50 mA cross-conduction between the MCU and the TriSense Pro's SCK/MOSI level shifter ([details](#spi-pin-release-trisense-pro-level-shifter)), I2C interface of the IMU disabled in SPI mode, optional SPI mode 3, `TriSenseConfig` for magnetometer/barometer/IMU rates, `TriSense::sleep()` / `wake()`, BMP580 OSR/ODR validity check, and a `LowPower` example.
+> **New in v1.6.0:** SPI pin release on RP2040/RP2350, AVR, SAMD and ESP32 — removes a 30–50 mA cross-conduction between the MCU and the TriSense Pro's SCK/MOSI level shifter ([details](#spi-pin-release-trisense-pro-level-shifter)), I2C interface of the IMU disabled in SPI mode, optional SPI mode 3, `TriSenseConfig` for magnetometer/barometer/IMU rates, `TriSense::sleep()` / `wake()`, BMP580 OSR/ODR validity check, and a `LowPower` example.
 
 > **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, FIFO overflow detection, burst FIFO reads (~18× fewer bus transactions), and a custom SPI/I2C pin-mapping example.
 
@@ -552,31 +552,31 @@ So whenever the IMU is *not* being talked to, the module drives its own SCK and 
 
 ### The fix: release the pins between transactions
 
-With pin release enabled the driver does every SPI transaction in this order:
+With pin release enabled the driver keeps SCK and MOSI as high-impedance inputs except while the IMU is selected. Arduino has no API for "let go of a pin the SPI peripheral owns", so each core gets its own small backend, built on the mechanism that core itself uses to hand a pin to the SPI:
 
-1. `SPI.beginTransaction()`
-2. CS → LOW — the shifter turns round, its connector side becomes an input
-3. SCK and MOSI → SPI function
-4. transfer
-5. SCK and MOSI → released (`GPIO_FUNC_NULL`, high impedance)
-6. CS → HIGH — the shifter drives the pins again, now with nothing driving back
-7. `SPI.endTransaction()`
+| Platform | Pin release | How | Order |
+|----------|-------------|-----|-------|
+| **RP2040 / RP2350** (arduino-pico) | ✅ on by default | `gpio_set_function()`: SPI ↔ NULL | CS low → take pins … release pins → CS high |
+| **AVR** (Uno, Nano, Mega, Leonardo …) | ✅ on by default | data-direction bit — with the SPI enabled as master the *direction* of SCK/MOSI is the user's, the *value* the SPI's | take pins → CS low … CS high → release pins |
+| **SAMD21 / SAMD51** | ✅ on by default | `pinMode(INPUT)` ↔ `pinPeripheral()` (the PMUX enable) | take pins → CS low … CS high → release pins |
+| **ESP32 / S2 / S3 / C3 / C6** (arduino-esp32 3.x) | ✅ on by default | GPIO matrix: the pin's output routing is saved, the pin made an input, the routing written back | take pins → CS low … CS high → release pins |
+| others (STM32, nRF52, Teensy, Renesas, mbed …) | ❌ | — | falls back to SPI mode 3, see below |
 
-The pins are released right after `SPI.begin()` too, so the short never flows, not even during the reset at start-up. MISO is untouched. A FIFO burst stays **one** transaction with one attach/release pair, however many bytes it moves, so the throughput cost is a few register writes per transaction. While released, SCK is held at its idle level by the internal pull resistor (pull-down in mode 0, pull-up in mode 3) so the brief moments in which it floats cannot become a clock edge.
+**Why two orders.** On RP2040/RP2350 SCK can be held at its idle level by an internal pull resistor (pull-down in mode 0, pull-up in mode 3), so the pins are switched *inside* the CS-low window and the MCU never drives against the shifter at all. AVR, SAMD and ESP32 have no pull-down, so a released SCK would float for a moment while CS is low, and a float followed by the SPI snapping it to its idle level can be a clock edge. There the pins are taken *before* CS falls and released *after* it rises: SCK is driven at its idle level for the whole CS-low window, and the two drivers overlap only for the few microseconds between the pin switch and the CS edge — well under 1 % of the time instead of nearly 100 %.
 
-| Platform | Pin release |
-|----------|-------------|
-| **RP2040 / RP2350** (arduino-pico) | ✅ On by default whenever the pins are known |
-| ESP32, AVR, SAMD, others | ❌ No-op: SCK/MOSI stay driven between transactions, as before. On ESP32 it could be done through the GPIO matrix (`pinMatrixOutDetach()`), but the re-attach API differs between core 2.x and 3.x and is not implemented. SPI mode 3 (below) at least removes the SCK half of the fight at idle. |
+The pins are released right after `SPI.begin()` too. MISO is untouched. A FIFO burst stays **one** transaction with one take/release pair, however many bytes it moves; the cost is a few register writes (RP2040/RP2350) to a few microseconds (AVR, ESP32) per transaction.
 
-**How the driver knows the pins** (RP2040/RP2350):
+**How the driver knows the pins:**
 
 - pins passed to `imu.begin(BUS_SPI, cs, freq, addr, sck, miso, mosi)`, or
 - `imu.setSpiPinRelease(sck, mosi)` — before or after `begin()`, or
 - `TriSenseConfig::spiSckPin` / `spiMosiPin` with `beginAll(mode, config, ...)`, or
-- otherwise detected after `SPI.begin()`: the pins in SPI function are read back from the GPIO function registers and used if there is exactly one SCK and one TX pin. With a second SPI bus in use this is ambiguous and release stays off — pass the pins explicitly then.
+- otherwise found after `SPI.begin()`:
+  - RP2040/RP2350: the spi0 pins in SPI function (the library uses the global `SPI`, which is spi0). Exactly one SCK and one TX pin are required; two SCK pins both muxed to spi0 would be ambiguous and release stays off.
+  - ESP32: the one pin routed to an SPI clock and the one routed to that host's data-out in the GPIO matrix. With two SPI buses in use this is ambiguous and release stays off — pass the pins explicitly then.
+  - AVR / SAMD: the core's fixed SPI pins (`SCK`/`MOSI`, `PIN_SPI_SCK`/`PIN_SPI_MOSI`).
 
-The pin numbers are checked against the RP2040/RP2350 GPIO function table (SCK must be a pin with `n % 4 == 2`, MOSI `n % 4 == 3`, same SPI instance), so a wrong number can never route an SPI signal onto an unrelated pin.
+Explicit pins are checked before they are used — against the GPIO function table on RP2040/RP2350 (SCK `n % 4 == 2`, MOSI `n % 4 == 3`, spi0), against the hardware SPI pins on AVR, the SERCOM pin type on SAMD, and the actual matrix routing on ESP32 — so a wrong number can never take over an unrelated pin.
 
 ```cpp
 sensor.imu.setSpiPinRelease(2, 3);   // SCK = GPIO2, MOSI = GPIO3
@@ -598,7 +598,7 @@ With CS HIGH the TXS0102 also joins the IMU's pins to the module's I2C bus, so a
 sensor.imu.setSpiMode(SPI_MODE3);    // or TriSenseConfig::spiMode = SPI_MODE3
 ```
 
-The ICM-42688-P supports modes 0 and 3; the default stays `SPI_MODE0` for backward compatibility. Mode 3 idles SCK **HIGH** — the same level as an idle I2C SCL. When CS rises, the TXS0102 connects the IMU's SCLK pin (which still holds the last SCK level) to the I2C bus; in mode 0 that level is LOW and puts a LOW edge onto SCL, in mode 3 it is HIGH and nothing happens. On cores without pin release, mode 3 also stops SCK from fighting the shifter while idle (MOSI still can).
+The ICM-42688-P supports modes 0 and 3 (DS-000347, `DEVICE_CONFIG.SPI_MODE`), so the data is the same either way. The default is `SPI_MODE0` while pin release is active and **`SPI_MODE3` where it is not** (a core without a backend, or pins that could not be found); `setSpiMode()` always wins. Mode 3 idles SCK **HIGH** — the same level as an idle I2C SCL. When CS rises, the TXS0102 connects the IMU's SCLK pin (which still holds the last SCK level) to the I2C bus; in mode 0 that level is LOW and puts a LOW edge onto SCL, in mode 3 it is HIGH and nothing happens. On cores without pin release, mode 3 also stops SCK from fighting the shifter while idle (MOSI still can).
 
 ---
 
@@ -661,7 +661,7 @@ See [`examples/LowPower`](examples/LowPower/LowPower.ino).
 | `beginSPI(csPin, freq, sck, miso, mosi)` | SPI-specific init |
 | `setSpiPinRelease(sck, mosi)` | Release SCK/MOSI between transactions (RP2040/RP2350; `-1` = off). Returns `false` where unsupported |
 | `isSpiPinReleaseActive()` | True if SCK/MOSI are currently released between transactions |
-| `setSpiMode(mode)` / `getSpiMode()` | `SPI_MODE0` (default) or `SPI_MODE3` |
+| `setSpiMode(mode)` / `getSpiMode()` | `SPI_MODE0` (default with pin release) or `SPI_MODE3` (default without) |
 | `sleep()` / `wake()` / `isSleeping()` | Accel + gyro off / back on with the previous configuration |
 | `setODR(odr)` | Set output data rate |
 | `setAccelFS(fs)` | Set accelerometer full-scale range |

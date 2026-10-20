@@ -99,8 +99,8 @@ bool beginWithCustomPins() {
   // SCK/MISO/MOSI pins have to be passed directly into imu.begin() instead
   // of going through the beginAll() shortcut.
   //
-  // SPI pin release is not implemented on ESP32: setSpiPinRelease() returns
-  // false there and SCK/MOSI stay driven between transactions (README).
+  // The pins passed here are also the ones SPI pin release uses: SCK and
+  // MOSI are let go between IMU transactions (README, "SPI pin release").
   bool ok = sensor.imu.begin(BUS_SPI, TRISENSE_CS, 10000000, ICM_ADDR_PRIMARY,
                               TRISENSE_SCK, TRISENSE_MISO, TRISENSE_MOSI);
   ok = sensor.beginBMP() && ok;

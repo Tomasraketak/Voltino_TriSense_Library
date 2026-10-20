@@ -12,7 +12,7 @@
  *                           OSR/ODR pair that was asked for
  *   - sleep() / wake()   -> IMU off, magnetometer power-down, barometer
  *                           standby; wake() restores every previous setting
- *   - SPI pin release    -> on RP2040/RP2350 the SCK/MOSI pins are parked as
+ *   - SPI pin release    -> on RP2040/RP2350, AVR, SAMD and ESP32 the SCK/MOSI pins are parked as
  *                           inputs between IMU transactions, which removes the
  *                           tens-of-mA fight with the TriSense Pro's level
  *                           shifter (see README, "SPI pin release")

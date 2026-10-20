@@ -143,11 +143,13 @@ struct TriSenseConfig {
   ICM_ODR imuOdr = (ICM_ODR)0;
   ICM_FIFO_MODE imuFifoMode = FIFO_16BIT;
 
-  // MODE_HYBRID only. SCK/MOSI pins for SPI pin release (RP2040/RP2350, see
-  // ICM42688P::setSpiPinRelease()). -1 = let the driver detect them.
+  // MODE_HYBRID only. SCK/MOSI pins for SPI pin release (RP2040/RP2350, AVR,
+  // SAMD, ESP32 - see ICM42688P::setSpiPinRelease()). -1 = let the driver
+  // detect them.
   int8_t spiSckPin = -1;
   int8_t spiMosiPin = -1;
-  // MODE_HYBRID only. SPI_MODE0 (default) or SPI_MODE3.
+  // MODE_HYBRID only. SPI_MODE3 forces mode 3; the default leaves the choice
+  // to the driver (mode 0 with pin release, mode 3 without).
   uint8_t spiMode = (uint8_t)SPI_MODE0;
 };
 
