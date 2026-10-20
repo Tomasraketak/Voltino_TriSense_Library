@@ -1,4 +1,5 @@
 #include "ICM42688P_voltino.h"
+#include <string.h>   // memset
 
 // Constant lookup tables live in flash on AVR, where plain const data is
 // copied to the (scarce) RAM at start-up. Elsewhere const data is already in
@@ -605,7 +606,11 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
     spiSelect();
     _spi->transfer(startReg | 0x80); 
-    for(size_t i=0; i<len; i++) buffer[i] = _spi->transfer(0x00);
+    // One block transfer instead of a call per byte: on RP2040/RP2350 the
+    // per-call overhead was larger than the byte time itself, and a FIFO burst
+    // is up to 2.5 KB. The buffer is sent as the dummy bytes, so zero it first.
+    memset(buffer, 0, len);
+    _spi->transfer(buffer, len);
     spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
@@ -965,13 +970,13 @@ uint8_t ICM42688P::fillFIFOBuffer() {
     // tally, so read that - only here, to keep two register reads out of the
     // normal path.
     //
-    // Byte order: the datasheet's register description puts the LOW byte at
-    // 0x6C; its register map table says the opposite. This follows the
-    // description. If the lost count only ever moves in steps of 256, it is
-    // the other way round.
+    // Byte order: the HIGH byte is at 0x6C, as the datasheet's register map
+    // table has it - its register description says the opposite. Read the
+    // other way round, a module losing ~1300 packets per 100 ms at 32 kHz
+    // reported 2 000 - 50 000; the byte-swapped counter matches that exactly.
     uint8_t lost[2];
     readRegisters(ICM42688_REG_FIFO_LOST_PKT0, lost, 2);
-    const uint16_t raw = (uint16_t)lost[0] | ((uint16_t)lost[1] << 8);
+    const uint16_t raw = ((uint16_t)lost[0] << 8) | (uint16_t)lost[1];
 
     if (!_lostPacketPrimed) {
       _lostPacketPrimed = true;

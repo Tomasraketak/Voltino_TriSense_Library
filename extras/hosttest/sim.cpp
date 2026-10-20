@@ -154,8 +154,8 @@ struct Icm {
     if (reg == 0x2E) return (uint8_t)(n >> 8);
     if (reg == 0x2F) return (uint8_t)n;
     if (reg == 0x2D) { uint8_t s = full ? 0x02 : 0; full = false; return s; }   // INT_STATUS, read-to-clear
-    if (reg == 0x6C) return (uint8_t)lost;
-    if (reg == 0x6D) return (uint8_t)(lost >> 8);
+    if (reg == 0x6C) return (uint8_t)(lost >> 8);   // High byte first (register map table)
+    if (reg == 0x6D) return (uint8_t)lost;
     if (reg >= 0x1F && reg <= 0x2A) {        // direct data registers (FIFO_NONE)
       int32_t a[3], g[3];
       sample(g_us * 1e-6, a, g, false);

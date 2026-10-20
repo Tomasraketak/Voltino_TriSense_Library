@@ -17,6 +17,10 @@ public:
   void beginTransaction(SPISettings) { _first = true; }
   void endTransaction() {}
   uint8_t transfer(uint8_t b);
+  void transfer(void *buf, size_t n) {   // In-place block transfer, as on real cores
+    uint8_t *p = (uint8_t *)buf;
+    for (size_t i = 0; i < n; i++) p[i] = transfer(p[i]);
+  }
 private:
   bool _first = true;
   uint8_t _reg = 0;
