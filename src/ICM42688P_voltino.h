@@ -3,6 +3,19 @@
 #include <Wire.h>
 #include <SPI.h>
 
+// Constructors are constexpr only on AVR. There a global object is then laid
+// out by the compiler instead of built by start-up code, which saves flash. On
+// 32-bit cores the compiler would instead store the whole object - including
+// the multi-KB zeroed FIFO buffer - as initialised data in flash, so it costs
+// more than it saves there.
+#ifndef TRISENSE_CTOR_CONSTEXPR
+  #if defined(__AVR__)
+    #define TRISENSE_CTOR_CONSTEXPR constexpr
+  #else
+    #define TRISENSE_CTOR_CONSTEXPR
+  #endif
+#endif
+
 // The concrete class of the core's SPI objects - SPIClass on AVR/ESP32,
 // SPIClassRP2040 on arduino-pico, SPIClassSAMD on SAMD, and so on. Taken from
 // the global SPI object itself, so every core gets its own type and the
@@ -11,6 +24,24 @@
 template <typename T> struct TriSenseNoRef { typedef T type; };
 template <typename T> struct TriSenseNoRef<T &> { typedef T type; };
 typedef TriSenseNoRef<decltype(SPI)>::type TriSenseSPIClass;
+
+// TRISENSE_LITE leaves out code that cannot run on the target anyway, to make
+// room on 8-bit AVRs (Uno, Leonardo, Nano Every, Teensy 2.0 ...). It is on by
+// default there and off everywhere else; behaviour is the same either way.
+// Today it removes the 20-bit HiRes FIFO path - an AVR has always been given
+// 16-bit packets instead - and sizes the FIFO buffer for 16-byte packets.
+// Override with -DTRISENSE_LITE=0 or =1.
+//
+// Tested with __AVR__ alone, never ARDUINO_ARCH_AVR: older Teensyduino releases
+// define ARDUINO_ARCH_AVR for Teensy 3.x/4.x too, which have the FPU and RAM for
+// HiRes.
+#if !defined(TRISENSE_LITE)
+  #if defined(__AVR__)
+    #define TRISENSE_LITE 1
+  #else
+    #define TRISENSE_LITE 0
+  #endif
+#endif
 
 // Register definitions
 #define ICM42688_REG_DEVICE_CONFIG 0x11
@@ -159,7 +190,7 @@ public:
   // constexpr: all initial values live in the class (below), so a global
   // driver object is laid out by the compiler instead of being built by
   // start-up code. Same object, less flash on small parts.
-  constexpr ICM42688P() {}
+  TRISENSE_CTOR_CONSTEXPR ICM42688P() {}
   
   // --- Initialization ---
   bool beginI2C(uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sdaPin = -1, int8_t sclPin = -1);
@@ -294,7 +325,9 @@ public:
   // Wrappers and specific methods for direct calls
   bool readSensorData(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readHardwareFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
+#if !TRISENSE_LITE
   bool readHardwareFIFOHires(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
+#endif
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
   // --- Calibration ---
@@ -397,7 +430,11 @@ private:
   // from the sensor a whole burst at a time: one FIFO_COUNT read plus one bulk
   // FIFO_DATA read serve up to FIFO_BURST_PACKETS packets, instead of two bus
   // transactions per single packet.
+#if TRISENSE_LITE
+  static const uint8_t FIFO_MAX_PACKET_SIZE = 16;   // No HiRes, so no 20-byte packets
+#else
   static const uint8_t FIFO_MAX_PACKET_SIZE = 20;
+#endif
   // Sizing this BELOW the hardware FIFO's capacity (102 x 20-byte packets) means
   // a full FIFO needs several round trips to empty, each paying its own
   // INT_STATUS + FIFO_COUNT reads - extra latency at exactly the moment the
@@ -405,7 +442,7 @@ private:
   // the whole FIFO. Override with -DTRISENSE_FIFO_BURST_PACKETS=n.
 #if defined(TRISENSE_FIFO_BURST_PACKETS)
   static const uint8_t FIFO_BURST_PACKETS = TRISENSE_FIFO_BURST_PACKETS;
-#elif defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+#elif defined(__AVR__)   // Not ARDUINO_ARCH_AVR - older Teensyduino sets it on Teensy 3.x/4.x
   static const uint8_t FIFO_BURST_PACKETS = 8;    // 160 B - an Uno has 2 KB total
 #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350) || defined(ESP32) \
    || defined(ARDUINO_ARCH_SAMD51) || defined(__IMXRT1062__)

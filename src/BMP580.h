@@ -4,6 +4,19 @@
 #include <Wire.h>
 #include <Arduino.h>
 
+// Constructors are constexpr only on AVR. There a global object is then laid
+// out by the compiler instead of built by start-up code, which saves flash. On
+// 32-bit cores the compiler would instead store the whole object - including
+// the multi-KB zeroed FIFO buffer - as initialised data in flash, so it costs
+// more than it saves there.
+#ifndef TRISENSE_CTOR_CONSTEXPR
+  #if defined(__AVR__)
+    #define TRISENSE_CTOR_CONSTEXPR constexpr
+  #else
+    #define TRISENSE_CTOR_CONSTEXPR
+  #endif
+#endif
+
 // BMP580 I2C addresses
 #define BMP580_PRIMARY_I2C_ADDR 0x46
 #define BMP580_SECONDARY_I2C_ADDR 0x47
@@ -91,7 +104,7 @@ enum BMP580_Mode {
 
 class BMP580 {
  public:
-  constexpr BMP580() {}     // initial values are in the class, see below
+  TRISENSE_CTOR_CONSTEXPR BMP580() {}     // initial values are in the class, see below
   // `wire` selects the I2C bus. The TriSense module keeps all of its sensors on
   // one bus, so this is normally whatever TriSense::beginAll() was given.
   bool begin(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);

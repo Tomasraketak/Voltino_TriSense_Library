@@ -780,7 +780,10 @@ void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
 }
 
 void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
-  #if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+  // A LITE build has no HiRes path (see TRISENSE_LITE). This used to test
+  // ARDUINO_ARCH_AVR as well, which older Teensyduino releases define for
+  // Teensy 3.x/4.x too, so those silently got 16-bit packets instead of HiRes.
+  #if TRISENSE_LITE
     if (mode == FIFO_20BIT_HIRES) {
       mode = FIFO_16BIT;
     }
@@ -1031,7 +1034,9 @@ bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, f
   switch (_fifoMode) {
     case FIFO_NONE: return readSensorData(ax, ay, az, gx, gy, gz);
     case FIFO_16BIT: return readHardwareFIFO(ax, ay, az, gx, gy, gz);
+#if !TRISENSE_LITE
     case FIFO_20BIT_HIRES: return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
+#endif
     default: return false;
   }
 }
@@ -1113,6 +1118,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 }
 
 // [VOLTINO FIX] PERFEKTNÍ 20-BIT PARSOVÁNÍ PODLE TDK DATASHEETU
+#if !TRISENSE_LITE
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   const uint8_t* buffer = nextFIFOPacket();
   if (buffer == nullptr) return false;
@@ -1149,6 +1155,7 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   scaleSample(raw, scaleAccel20, scaleGyro20, ax, ay, az, gx, gy, gz);
   return true;
 }
+#endif
 
 float ICM42688P::readTemperature() {
   uint8_t buffer[2];

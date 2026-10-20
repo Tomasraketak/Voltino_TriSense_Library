@@ -644,17 +644,24 @@ two Newton–Raphson steps where it does not. Nothing to configure.
 
 ### On AVR specifically
 
-- `FIFO_20BIT_HIRES` falls back to `FIFO_16BIT` automatically; the 20-bit path
-  needs 32-bit arithmetic the part cannot do cheaply.
-- The FIFO burst buffer is 160 B rather than 2560 B, because an Uno has 2 KB of
+- `FIFO_20BIT_HIRES` falls back to `FIFO_16BIT` automatically, and the 20-bit
+  code is not even compiled in (`TRISENSE_LITE`, on by default for AVR).
+- The FIFO burst buffer is 128 B rather than 2560 B, because an Uno has 2 KB of
   RAM in total.
-- `AdvancedTriFusion` fits, but keep the ODR at or below 200 Hz.
+- `AdvancedTriFusion` fits on the Uno, Nano Every and Teensy 2.0; keep the ODR
+  at or below 200 Hz. On a Leonardo / Pro Micro (28 KB) build it with
+  `-DTRISENSE_NO_ADAPTIVE_GAIN` - see "Small boards" in the README for that and
+  the other opt-in switches.
 
 ### Forcing double precision
 
-```cpp
-#define FORCE_FUSION_DOUBLE
-#include <TriSense.h>
+Pass it as a compiler flag, never as a `#define` in the sketch — a sketch
+`#define` does not reach the library's `.cpp` files, so they would build the
+fusion object with a different layout from the sketch's.
+
+```ini
+; platformio.ini
+build_flags = -DFORCE_FUSION_DOUBLE
 ```
 
 Rarely worth it. Float already resolves far below the sensor's own noise floor,

@@ -75,6 +75,30 @@
   #define DEFAULT_CALIBRATION_SAMPLES 500
 #endif
 
+// ---------------------------------------------------------
+// OPTIONAL FEATURE SWITCHES (all off by default)
+// ---------------------------------------------------------
+// Each one removes a fusion feature to save flash, for when a sketch does not
+// fit (Leonardo, Teensy 2.0 ...). Nothing is ever switched off automatically;
+// without these defines the library behaves exactly as documented.
+//
+//   TRISENSE_NO_DYNAMIC_BIAS   no in-flight learning of the X/Y gyro bias;
+//                              setDynamicGyroBias() is accepted but has no
+//                              effect. The yaw bias (setYawKi) is unaffected.
+//   TRISENSE_NO_ADAPTIVE_GAIN  constant correction gains (setMaxGains) instead
+//                              of the Gaussian weighting by |a|, |m| and tilt -
+//                              drops exp(). The gimbal-lock guard stays.
+//   TRISENSE_NO_RATE_TRACKING  getActualFusionHz() always returns 0.
+//   TRISENSE_NO_BATCH_AVERAGE  after a FIFO batch, lastA*/lastG* (and so the
+//                              linear/global acceleration) hold the newest
+//                              packet instead of the batch mean.
+//
+// They must reach the library's own .cpp files, so a #define in the sketch is
+// NOT enough. Pass them as compiler flags instead, e.g.
+//   PlatformIO:   build_flags = -DTRISENSE_NO_ADAPTIVE_GAIN
+//   arduino-cli:  --build-property "compiler.cpp.extra_flags=-DTRISENSE_NO_ADAPTIVE_GAIN"
+// The same goes for TRISENSE_LITE (see ICM42688P_voltino.h).
+
 // --- ACCELERATION UNITS ---
 enum AccelUnit {
   ACCEL_UNIT_G,      
@@ -159,7 +183,7 @@ public:
   AK09918C mag;
   ICM42688P imu;
 
-  constexpr TriSense() {}   // initial values are in the class, see below
+  TRISENSE_CTOR_CONSTEXPR TriSense() {}   // initial values are in the class, see below
   
   // All three sensors share one I2C bus (the ICM-42688-P leaves it only when
   // put on SPI in MODE_HYBRID), so the bus is selected once here and handed to
@@ -331,15 +355,19 @@ public:
   void quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE& pitch, FUSION_MATH_TYPE& yaw);
 
 public:
-  // constexpr: every member has its initial value in the class, so a global
+  // constexpr on AVR (see TRISENSE_CTOR_CONSTEXPR): every member has its initial value in the class, so a global
   // fusion object is laid out by the compiler (copied into RAM with the rest of
   // .data) instead of being built field by field by start-up code - about 1 KB
   // less flash on AVR, and the same object either way.
-  constexpr TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
+  TRISENSE_CTOR_CONSTEXPR TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
   virtual bool update() = 0;
   
   void setMountOrientation(TriSenseOrientation orientation);
   float getActualFusionHz(); 
+  // The attitude as a unit quaternion (w, x, y, z), body to earth frame. Unlike
+  // the Euler angles it has no singularity, so use it whenever the board may
+  // point straight up or down (a rocket on the pad, a tumbling payload).
+  void getQuaternion(float& w, float& x, float& y, float& z);
   
   // One-point gravity calibration: hold the board still, any face up. Refines
   // the driver's accelerometer offset (in sensor axes) - it does NOT touch the
@@ -386,7 +414,7 @@ private:
                        FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz,
                        FUSION_MATH_TYPE dt);
 public:
-  constexpr SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
+  TRISENSE_CTOR_CONSTEXPR SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
   bool update() override;
   void enableLightweightGravity(bool enable, float kp = 0.02f); 
 };
@@ -401,7 +429,7 @@ private:
                                FUSION_MATH_TYPE correction_dt);
   void scheduledCorrection();
 public:
-  constexpr AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
+  TRISENSE_CTOR_CONSTEXPR AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
   bool update() override;
 };
 

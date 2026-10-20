@@ -61,7 +61,7 @@ The library auto-detects your platform and sets optimal defaults:
 
 `float` is the default everywhere so the hardware FPU is used; `double` is selected only when you define `FORCE_FUSION_DOUBLE`.
 
-You can override precision manually by defining `FORCE_FUSION_FLOAT` or `FORCE_FUSION_DOUBLE` before including the library.
+You can override precision with `FORCE_FUSION_FLOAT` or `FORCE_FUSION_DOUBLE` — as a **compiler flag** (e.g. PlatformIO `build_flags = -DFORCE_FUSION_DOUBLE`), not a `#define` in the sketch. A sketch `#define` only reaches the sketch, not the library's own `.cpp` files, so the two would disagree on the size of the fusion object and corrupt memory.
 
 ### 📦 TriSense Data Snapshot
 
@@ -102,7 +102,7 @@ Supports three FIFO modes:
 
 - `FIFO_NONE` — Direct register reads (simple, minimal latency)
 - `FIFO_16BIT` — 16-bit FIFO packet mode (balanced)
-- `FIFO_20BIT_HIRES` — 20-bit high-resolution mode (16× precision, **automatically disabled on AVR** to save RAM)
+- `FIFO_20BIT_HIRES` — 20-bit high-resolution mode (16× precision; not compiled into 8-bit AVR builds, which fall back to 16-bit — see [Small boards](#small-boards-flash-and-ram))
 
 ### 📈 MCU-Clocked Adaptive Timebase
 
@@ -483,13 +483,13 @@ The IMU driver supports three reading modes:
 | **16-bit FIFO** | `setFIFOMode(FIFO_16BIT)` | 16-bit | Low | General use (default) |
 | **20-bit High-Res** | `setFIFOMode(FIFO_20BIT_HIRES)` | 20-bit (16×) | Moderate | Precision analysis |
 
-> **Note:** High-res mode is **automatically disabled on AVR** (Arduino Uno, Nano, Mega) to conserve RAM. It forces the accelerometer to ±16 G and gyroscope to ±2000 dps ranges.
+> **Note:** High-res mode is **not available on 8-bit AVR** (Uno, Nano, Mega, Leonardo, Nano Every, Teensy 2.0): `setFIFOMode(FIFO_20BIT_HIRES)` falls back to 16-bit there, and the code is left out of the build (`TRISENSE_LITE`). Teensy 3.x/4.x support it (earlier library versions treated them as AVR under older Teensyduino releases, which define `ARDUINO_ARCH_AVR` for every Teensy). HiRes forces the accelerometer to ±16 G and the gyroscope to ±2000 dps.
 
 In 20-bit mode the packet's 20-bit field is the 16-bit sample shifted left by 4 with the extension nibble appended below it, so the effective sensitivity is 16× the 16-bit value: **32768 LSB/g** and **262.4 LSB/dps**.
 
 ### 🚚 Burst FIFO Reads
 
-`readFIFO()` still returns one packet per call, but bytes are fetched from the sensor a **whole burst at a time**: a single `FIFO_COUNT` read plus one bulk `FIFO_DATA` read serve up to 32 packets (8 on AVR), which are then parsed from RAM with no further bus traffic. Draining a full 128-packet FIFO costs **~14 bus transactions instead of 256**.
+`readFIFO()` still returns one packet per call, but bytes are fetched from the sensor a **whole burst at a time**: a single `FIFO_COUNT` read plus one bulk `FIFO_DATA` read serve up to 128 packets on RP2040/RP2350, ESP32, SAMD51 and Teensy 4.x (a whole FIFO), 8 on AVR and 32 elsewhere (override with `-DTRISENSE_FIFO_BURST_PACKETS=n`), which are then parsed from RAM with no further bus traffic. Draining a full 128-packet FIFO costs **~14 bus transactions instead of 256**.
 
 Faster draining directly reduces the chance of overflowing the FIFO in the first place. On I2C the bulk read is automatically split into Wire-buffer-sized chunks; the FIFO read pointer advances per byte, so packets still stream consecutively.
 
@@ -632,6 +632,43 @@ See [`examples/LowPower`](examples/LowPower/LowPower.ino).
 
 ---
 
+## Small boards: flash and RAM
+
+The library fits the 8-bit AVRs. What a sketch needs (`examples/`, Arduino AVR core 1.8.6, LTO on):
+
+| board | `AdvancedFusion` | `SimpleFusion` |
+|---|---|---|
+| Uno / Nano (32 KB) | 27 228 B flash, 1 028 B RAM | 22 538 B, 1 026 B |
+| Nano Every | 30 610 B, 1 134 B | 25 976 B, 1 132 B |
+| Teensy 2.0 (32 KB) | 31 582 B, 1 011 B | 26 786 B, 1 007 B |
+| Leonardo / Pro Micro (28 KB usable) | **29 270 B — too big**; 28 308 B with `TRISENSE_NO_ADAPTIVE_GAIN` | 24 578 B, 989 B |
+
+Two things keep it small without costing anything on bigger boards:
+
+- **`TRISENSE_LITE`** is on by default on `__AVR__` only. It leaves out the 20-bit HiRes FIFO path (which an AVR never ran: it has always fallen back to 16-bit packets) and sizes the FIFO buffer for 16-byte packets. Override with `-DTRISENSE_LITE=0/1`.
+- Constructors are `constexpr` on AVR, so global objects need no start-up code there.
+
+If a sketch still does not fit, these **opt-in** switches each remove one fusion feature. Nothing is switched off unless you ask for it:
+
+| flag | removes | effect |
+|---|---|---|
+| `TRISENSE_NO_ADAPTIVE_GAIN` | Gaussian weighting of the correction by \|a\|, \|m\| and tilt (and `exp()`) | constant gains from `setMaxGains()`; the gimbal-lock guard stays. Saves ~1 KB |
+| `TRISENSE_NO_DYNAMIC_BIAS` | in-flight learning of the X/Y gyro bias | `setDynamicGyroBias()` is accepted but does nothing |
+| `TRISENSE_NO_RATE_TRACKING` | the fusion-rate counter | `getActualFusionHz()` returns 0 |
+| `TRISENSE_NO_BATCH_AVERAGE` | averaging of a FIFO batch | `lastA*`/linear acceleration show the newest packet |
+
+All of these — like `FORCE_FUSION_DOUBLE` and `TRISENSE_FIFO_BURST_PACKETS` — must be **compiler flags**. A `#define` in the sketch only reaches the sketch, not the library's own `.cpp` files.
+
+```ini
+; platformio.ini
+build_flags = -DTRISENSE_NO_ADAPTIVE_GAIN
+```
+```sh
+arduino-cli compile --build-property "compiler.cpp.extra_flags=-DTRISENSE_NO_ADAPTIVE_GAIN" ...
+```
+
+In the simulation harness (`extras/hosttest`, `make accuracy`), none of the switches changes the attitude error noticeably. Tilt stays within about 0.6–0.9° RMS in every configuration. Real flights have vibration and magnetic disturbances, which is exactly what the adaptive gain is for, so keep it wherever the flash allows.
+
 ## API Reference
 
 ### `TriSense` Class
@@ -750,6 +787,7 @@ See [`examples/LowPower`](examples/LowPower/LowPower.ino).
 | `initOrientation(samples)` | Initialize quaternion from initial accel/mag readings |
 | `calibrateAccelStatic(samples)` | 1-point gravity calibration; refines the driver's accel offset (**sensor axes**) |
 | `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
+| `getQuaternion(w, x, y, z)` | Attitude as a unit quaternion (body → earth). No gimbal lock — use it instead of Euler angles when the board can point straight up or down |
 | `getMagHeadingDegrees()` | Tilt-compensated, magnetometer-only heading (0–360°), independent of the fused/gyro yaw |
 | `getGlobalAcceleration(x, y, z, unit)` | World-frame acceleration, **gravity included** (batch-averaged, see above) |
 | `getGlobalLinearAcceleration(x, y, z, unit)` | Same as above with gravity removed — the quantity to integrate for dead reckoning |

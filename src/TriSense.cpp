@@ -165,6 +165,7 @@ float TriSense::readAltitude(float seaLevelPressure) { return bmp.readAltitude(s
 
 
 void TriSenseFusion::trackUpdateRate() {
+#if !defined(TRISENSE_NO_RATE_TRACKING)
   _updateCount++;
   unsigned long now = millis();
   if (now - _lastHzCheckTime >= 1000) {
@@ -174,10 +175,15 @@ void TriSenseFusion::trackUpdateRate() {
     _updateCount = 0;
     _lastHzCheckTime = now;
   }
+#endif
 }
 
 float TriSenseFusion::getActualFusionHz() {
   return _actualFusionHz;
+}
+
+void TriSenseFusion::getQuaternion(float& w, float& x, float& y, float& z) {
+  w = (float)q[0]; x = (float)q[1]; y = (float)q[2]; z = (float)q[3];
 }
 
 // Reciprocal square root - called on every quaternion normalisation, so it sits
@@ -258,8 +264,13 @@ void TriSenseFusion::clampSampleDt(FUSION_MATH_TYPE& dt, FUSION_MATH_TYPE ideal_
 
 FUSION_MATH_TYPE TriSenseFusion::gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma) {
   if (sigma == 0.0) return 0.0;
+#if defined(TRISENSE_NO_ADAPTIVE_GAIN)
+  (void)x; (void)mu;
+  return 1.0;
+#else
   FUSION_MATH_TYPE diff = x - mu;
   return exp(-(diff * diff) / ((FUSION_MATH_TYPE)2.0 * sigma * sigma));
+#endif
 }
 
 void TriSenseFusion::setMountOrientation(TriSenseOrientation orientation) { _mountOrientation = orientation; }
@@ -716,8 +727,13 @@ bool SimpleTriFusion::update() {
         FUSION_MATH_TYPE gy = gy_raw;
         FUSION_MATH_TYPE gz = gz_raw;
 
+#if defined(TRISENSE_NO_BATCH_AVERAGE)
+        sumAx = ax; sumAy = ay; sumAz = az;   // Newest packet only
+        sumGx = gx; sumGy = gy; sumGz = gz;
+#else
         sumAx += ax; sumAy += ay; sumAz += az;
         sumGx += gx; sumGy += gy; sumGz += gz;
+#endif
 
         integrateSample(ax, ay, az, gx, gy, gz, perfect_dt);
         processed++;
@@ -732,7 +748,11 @@ bool SimpleTriFusion::update() {
     // Publish the mean of the whole batch rather than just the final packet, so
     // getGlobalAcceleration() sees every accelerometer sample the FIFO delivered.
     // The per-sample values above still drive the integration.
+#if defined(TRISENSE_NO_BATCH_AVERAGE)
+    FUSION_MATH_TYPE invCount = 1;
+#else
     FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)processed;
+#endif
     lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
     lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
   }
@@ -777,12 +797,14 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   FUSION_MATH_TYPE final_accel_gain = g_gain_accel_raw * (FUSION_MATH_TYPE)maxAccelGain; 
   FUSION_MATH_TYPE final_mag_gain = g_gain_mag_raw * (FUSION_MATH_TYPE)maxMagGain;
   
+#if !defined(TRISENSE_NO_ADAPTIVE_GAIN)
   FUSION_MATH_TYPE tilt_rad_sq = 2.0 * (1.0 - vz);
   if (tilt_rad_sq < 0.0) tilt_rad_sq = 0.0;
   FUSION_MATH_TYPE tilt_deg_sq = tilt_rad_sq * 3282.806; 
   
   FUSION_MATH_TYPE tilt_gain = exp(-tilt_deg_sq / (2.0 * (FUSION_MATH_TYPE)magTiltSigmaDeg * (FUSION_MATH_TYPE)magTiltSigmaDeg));
   final_mag_gain *= tilt_gain;
+#endif
 
   // --- Gimbal-lock guard on the magnetometer heading ---
   //
@@ -827,10 +849,12 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
   FUSION_MATH_TYPE delta_yaw_rad = delta_yaw_deg * (FUSION_MATH_TYPE)PI / 180.0;
   
+#if !defined(TRISENSE_NO_DYNAMIC_BIAS)
   if (_dynamicBiasEnabled) {
       gyroBias[0] -= (FUSION_MATH_TYPE)_biasKi * ex * final_accel_gain * correction_dt * 57.29578;
       gyroBias[1] -= (FUSION_MATH_TYPE)_biasKi * ey * final_accel_gain * correction_dt * 57.29578;
   }
+#endif
   // gyroBias[] is subtracted from lastGx/y/z, which are in dps, so the radian
   // yaw error has to be converted to degrees here - the same 57.29578 factor
   // the X/Y terms above already apply.
@@ -927,8 +951,13 @@ bool AdvancedTriFusion::update() {
         FUSION_MATH_TYPE gy = gy_raw;
         FUSION_MATH_TYPE gz = gz_raw;
 
+#if defined(TRISENSE_NO_BATCH_AVERAGE)
+        sumAx = ax; sumAy = ay; sumAz = az;   // Newest packet only
+        sumGx = gx; sumGy = gy; sumGz = gz;
+#else
         sumAx += ax; sumAy += ay; sumAz += az;
         sumGx += gx; sumGy += gy; sumGz += gz;
+#endif
 
         gyroIntegration((gx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0,
                         (gy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0,
@@ -949,7 +978,11 @@ bool AdvancedTriFusion::update() {
     // Averaging keeps every sample and low-passes vibration, which also makes
     // the gravity estimate fed to complementaryCorrection() below steadier.
     {
+#if defined(TRISENSE_NO_BATCH_AVERAGE)
+      FUSION_MATH_TYPE invCount = 1;
+#else
       FUSION_MATH_TYPE invCount = (FUSION_MATH_TYPE)1.0 / (FUSION_MATH_TYPE)processed;
+#endif
       lastAx = sumAx * invCount; lastAy = sumAy * invCount; lastAz = sumAz * invCount;
       lastGx = sumGx * invCount; lastGy = sumGy * invCount; lastGz = sumGz * invCount;
     }

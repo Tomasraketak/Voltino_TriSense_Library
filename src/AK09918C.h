@@ -4,6 +4,19 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// Constructors are constexpr only on AVR. There a global object is then laid
+// out by the compiler instead of built by start-up code, which saves flash. On
+// 32-bit cores the compiler would instead store the whole object - including
+// the multi-KB zeroed FIFO buffer - as initialised data in flash, so it costs
+// more than it saves there.
+#ifndef TRISENSE_CTOR_CONSTEXPR
+  #if defined(__AVR__)
+    #define TRISENSE_CTOR_CONSTEXPR constexpr
+  #else
+    #define TRISENSE_CTOR_CONSTEXPR
+  #endif
+#endif
+
 // I2C address for AK09918C (Fixed)
 #define AK09918_I2C_ADDR  0x0C
 
@@ -43,7 +56,7 @@ enum AK09918_Mode {
 
 class AK09918C {
 public:
-  constexpr AK09918C() {}   // initial values are in the class, see below
+  TRISENSE_CTOR_CONSTEXPR AK09918C() {}   // initial values are in the class, see below
 
   // Standalone initialization matching Voltino conventions. 
   // Automatically handles bus init. Supports custom pins for ESP32/8266.

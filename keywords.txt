@@ -67,6 +67,7 @@ getAccelScaleZ	KEYWORD2
 getAccelSoftwareOffset	KEYWORD2
 getAccelSoftwareScale	KEYWORD2
 getActualFusionHz	KEYWORD2
+getQuaternion	KEYWORD2
 getCorrectionAngles	KEYWORD2
 getFIFOMode	KEYWORD2
 getFIFOOverflowCount	KEYWORD2
