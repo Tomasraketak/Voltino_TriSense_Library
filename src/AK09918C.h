@@ -58,6 +58,11 @@ public:
   // Mode and ODR configuration functions
   void setODR(AK09918_ODR odr); 
   void setMode(AK09918_Mode mode);
+
+  // Last value written to CNTL2 through setODR()/setMode(): an AK09918_ODR for
+  // continuous measurement, or an AK09918_Mode. Lets a caller power the sensor
+  // down and later return it to exactly the rate it had.
+  uint8_t getMode() const { return _currentMode; }
   
   // Hardware reset
   void softReset();

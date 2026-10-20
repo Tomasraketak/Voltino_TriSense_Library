@@ -29,6 +29,10 @@
  *   - getActualFusionHz()   -> measured update rate of the fusion loop
  *   - getMagHeadingDegrees() -> tilt-compensated magnetometer-only heading
  *   - fifoOverflowed()      -> detect dropped IMU packets
+ *   - imu.setSpiPinRelease() -> park SCK/MOSI as inputs between IMU
+ *                               transactions (RP2040/RP2350). Needed on the
+ *                               TriSense Pro, whose level shifter drives those
+ *                               pins while CS is HIGH - see README.
  */
 
 #include <Arduino.h>
@@ -75,6 +79,13 @@ bool beginWithCustomPins() {
   SPI.setTX(TRISENSE_MOSI);
   SPI.setRX(TRISENSE_MISO);
 
+  // Tell the IMU driver which pins are SCK and MOSI so it can release them
+  // between transactions. beginAll() would usually work them out by itself
+  // after SPI.begin(); naming them here makes it explicit. Pass -1, -1 to turn
+  // the release off (e.g. if another SPI device must share these pins - which
+  // the TriSense Pro does not allow anyway, see docs/GUIDE.md).
+  sensor.imu.setSpiPinRelease(TRISENSE_SCK, TRISENSE_MOSI);
+
   // beginAll() internally calls Wire.begin()/SPI.begin() with no pin
   // arguments, so the pin mapping configured above is kept.
   return sensor.beginAll(MODE_HYBRID, TRISENSE_CS, 10000000);
@@ -87,6 +98,9 @@ bool beginWithCustomPins() {
   // ESP32's SPIClass can't be pre-configured like RP2040's, so the custom
   // SCK/MISO/MOSI pins have to be passed directly into imu.begin() instead
   // of going through the beginAll() shortcut.
+  //
+  // SPI pin release is not implemented on ESP32: setSpiPinRelease() returns
+  // false there and SCK/MOSI stay driven between transactions (README).
   bool ok = sensor.imu.begin(BUS_SPI, TRISENSE_CS, 10000000, ICM_ADDR_PRIMARY,
                               TRISENSE_SCK, TRISENSE_MISO, TRISENSE_MOSI);
   ok = sensor.beginBMP() && ok;
@@ -138,6 +152,8 @@ void setup() {
 
   Serial.println("Running static calibration - keep the module still!");
   fusion.initOrientation(1000);
+  Serial.print("SPI pin release: ");
+  Serial.println(sensor.imu.isSpiPinReleaseActive() ? "active" : "off");
   Serial.println("Ready.");
 }
 

@@ -64,6 +64,7 @@ jobs:
               examples/CustomPins
               examples/GlobalAcceleration
               examples/IMUcalibration
+              examples/LowPower
               examples/MotionCal
               examples/RawDataI2C
               examples/SimpleFusion
@@ -81,6 +82,7 @@ jobs:
               examples/CustomPins
               examples/GlobalAcceleration
               examples/IMUcalibration
+              examples/LowPower
               examples/MotionCal
               examples/RawDataI2C
               examples/SimpleFusion
@@ -94,6 +96,7 @@ jobs:
             libraries: |
               - source-path: ./
             sketch-paths: |
+              examples/LowPower
               examples/MotionCal
               examples/RawDataI2C
               examples/SimpleFusion

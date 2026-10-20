@@ -1,5 +1,26 @@
 #include "ICM42688P_voltino.h"
 
+// SPI pin release needs direct control of the GPIO function select, which only
+// the arduino-pico core (earlephilhower) exposes through the Pico SDK. On every
+// other core the release calls compile to nothing.
+//
+// ESP32 could do the same through the GPIO matrix (pinMatrixOutDetach() and a
+// re-attach to the SPI peripheral's output signal), but the signal index and
+// the peripheral-manager rules differ between core 2.x and 3.x, so it is left
+// as a no-op there rather than shipped untested. See README, "SPI pin release".
+#if (defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)) && !defined(ARDUINO_ARCH_MBED)
+  #define ICM_SPI_PIN_RELEASE 1
+  #include <hardware/gpio.h>
+#endif
+
+// ArduinoCore-API based cores (arduino-pico, SAMD, mbed, Renesas) take an
+// SPIMode enum in SPISettings; the classic cores (AVR, ESP32) take a uint8_t.
+#if defined(ARDUINO_API_VERSION)
+  #define ICM_SPI_MODE_T SPIMode
+#else
+  #define ICM_SPI_MODE_T uint8_t
+#endif
+
 ICM42688P::ICM42688P() {
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
@@ -10,6 +31,10 @@ ICM42688P::ICM42688P() {
   _fifoPacketSize = 16;
   _debug = false;
   _csPin = -1;
+  _spiMode = (uint8_t)SPI_MODE0;
+  _accelFs = AFS_16G;
+  _gyroFs = GFS_2000DPS;
+  _pwrMgmt0 = ICM42688_PWR_SENSORS_LN;
 }
 
 void ICM42688P::setDebug(bool enable) { _debug = enable; }
@@ -46,6 +71,10 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
       pinMode(_csPin, OUTPUT);
       digitalWrite(_csPin, HIGH);
     }
+
+    // SPI.begin() below hands the pins back to the SPI peripheral, so any
+    // release from an earlier begin() no longer holds.
+    _relActive = false;
     
     #if defined(ESP32)
       if (sckSclPin != -1 && misoSdaPin != -1 && mosiPin != -1) {
@@ -63,6 +92,19 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
     #else
       SPI.begin(); 
     #endif
+    _spiStarted = true;
+
+    // SPI.begin() leaves SCK and MOSI as push-pull outputs. Release them right
+    // away, before the first transaction, so the level shifter on the TriSense
+    // Pro is not fought even for the few milliseconds of the reset below.
+    if (!_relConfigured) {
+      int8_t sck = sckSclPin;
+      int8_t mosi = mosiPin;
+      if (sck < 0 || mosi < 0) detectSpiPins(sck, mosi);
+      _relSck = sck;
+      _relMosi = mosi;
+    }
+    activateSpiPinRelease();
 
   } else {
     #if defined(ESP32) 
@@ -86,6 +128,27 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   }
   
   delay(10);
+  if (!resetDevice()) return false;
+
+  _pwrMgmt0 = ICM42688_PWR_SENSORS_LN;
+  _sleeping = false;
+  writeRegister(ICM42688_REG_PWR_MGMT0, _pwrMgmt0); // Sensors ON
+  _powerOnMs = millis();
+  delay(5);
+
+  setAccelFS(AFS_16G);
+  setGyroFS(GFS_2000DPS);
+  setODR(defaultOdr);
+  setFIFOMode(FIFO_NONE);
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reset and interface setup
+// ---------------------------------------------------------------------------
+
+bool ICM42688P::resetDevice() {
   writeRegister(ICM42688_REG_DEVICE_CONFIG, 0x01); // Soft Reset
   delay(10); 
 
@@ -98,25 +161,218 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
     return false;
   }
 
-  writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); // Sensors ON
-  delay(5);
-
-  setAccelFS(AFS_16G);
-  setGyroFS(GFS_2000DPS);
-  setODR(defaultOdr);
-  setFIFOMode(FIFO_NONE);
-
+  // The soft reset put INTF_CONFIG0 back to its reset value (0x30), which has
+  // both serial interfaces enabled, so this must follow every reset.
+  applyInterfaceConfig();
   return true;
 }
 
+// In BUS_SPI, switch the chip's I2C slave off: INTF_CONFIG0.UI_SIFS_CFG = 0b11
+// ("disable I2C", DS-000347, INTF_CONFIG0 bits 1:0). On the TriSense Pro the
+// TXS0102 joins the IMU's SCLK/SDI pins to the module's I2C bus whenever CS is
+// HIGH, so with I2C left on the IMU also answers there at 0x68 and decodes all
+// of the magnetometer / barometer traffic as I2C. Read-modify-write so the FIFO
+// count format and endianness bits are left alone - setFIFOMode() relies on
+// them and updates them the same way.
+//
+// Never in BUS_I2C: that would cut off the very interface being used.
+void ICM42688P::applyInterfaceConfig() {
+  if (_bus != BUS_SPI) return;
+  uint8_t intf = readRegister(ICM42688_REG_INTF_CONFIG0);
+  intf = (uint8_t)((intf & ~ICM42688_MASK_UI_SIFS_CFG) | ICM42688_UI_SIFS_DISABLE_I2C);
+  writeRegister(ICM42688_REG_INTF_CONFIG0, intf);
+}
+
+// ---------------------------------------------------------------------------
+// SPI transactions and pin release
+// ---------------------------------------------------------------------------
+//
+// The order matters on the TriSense Pro, where the SN74LVC2T45 in the SCK/MOSI
+// path takes its direction from CS:
+//   1. beginTransaction()
+//   2. CS LOW         - the shifter turns, the connector side becomes an input
+//   3. SCK/MOSI -> SPI function, now driving into an input
+//   4. transfer
+//   5. SCK/MOSI -> released (GPIO_FUNC_NULL, high impedance)
+//   6. CS HIGH        - the shifter turns back and drives the pins again,
+//                       which is harmless now that nothing drives against it
+//   7. endTransaction()
+// A FIFO burst is a single transaction, so it pays for one attach/release pair
+// no matter how many bytes it moves.
+
+void ICM42688P::spiSelect() {
+  SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, (ICM_SPI_MODE_T)_spiMode));
+  if (_csPin != -1) digitalWrite(_csPin, LOW);
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (_relActive) {
+    gpio_set_function((uint)_relSck, GPIO_FUNC_SPI);
+    gpio_set_function((uint)_relMosi, GPIO_FUNC_SPI);
+  }
+#endif
+}
+
+void ICM42688P::spiDeselect() {
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (_relActive) {
+    gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
+    gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
+  }
+#endif
+  if (_csPin != -1) digitalWrite(_csPin, HIGH);
+  SPI.endTransaction();
+}
+
+// On RP2040/RP2350 GPIO function 1 (SPI) is fixed per pin: GPIO n belongs to
+// SPI((n >> 3) & 1), and n % 4 selects the signal - 0 RX, 1 CSn, 2 SCK, 3 TX.
+// Checking against that table means a wrong pin number can never route an SPI
+// signal onto a pin that is wired to something else.
+bool ICM42688P::spiPinsValid(int8_t sck, int8_t mosi) {
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (sck < 0 || mosi < 0) return false;
+  if (sck >= (int8_t)NUM_BANK0_GPIOS || mosi >= (int8_t)NUM_BANK0_GPIOS) return false;
+  if ((sck & 3) != 2 || (mosi & 3) != 3) return false;
+  return ((sck >> 3) & 1) == ((mosi >> 3) & 1);   // Same SPI instance
+#else
+  (void)sck; (void)mosi;
+  return false;
+#endif
+}
+
+// For begin() without explicit pins: after SPI.begin() the pins the core chose
+// are the ones in SPI function. Accepted only if exactly one SCK and one TX pin
+// are found - a second SPI bus in use makes it ambiguous, and then release
+// stays off rather than guess. No private SPIClass state is touched.
+bool ICM42688P::detectSpiPins(int8_t &sck, int8_t &mosi) {
+#if defined(ICM_SPI_PIN_RELEASE)
+  int8_t foundSck = -1, foundMosi = -1;
+  uint8_t nSck = 0, nMosi = 0;
+  for (uint pin = 0; pin < NUM_BANK0_GPIOS; pin++) {
+    if (gpio_get_function(pin) != GPIO_FUNC_SPI) continue;
+    if ((pin & 3) == 2) { foundSck = (int8_t)pin; nSck++; }
+    if ((pin & 3) == 3) { foundMosi = (int8_t)pin; nMosi++; }
+  }
+  if (nSck == 1 && nMosi == 1 && spiPinsValid(foundSck, foundMosi)) {
+    sck = foundSck;
+    mosi = foundMosi;
+    return true;
+  }
+  if (_debug) Serial.println(F("ICM: SPI pins not detected - pin release off. Use setSpiPinRelease()."));
+#endif
+  sck = -1;
+  mosi = -1;
+  return false;
+}
+
+// While released, SCK is held at its idle level by a pull resistor. Without
+// it, the pin floats between CS falling and the SPI function taking over (and
+// again between release and CS rising), and a float to the non-idle level
+// followed by the snap back would be a clock edge the IMU counts as a bit.
+// MOSI is only sampled on SCK edges, so its pulls are simply switched off.
+void ICM42688P::applySckIdlePull() {
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (_spiMode == (uint8_t)SPI_MODE3) gpio_pull_up((uint)_relSck);
+  else                                gpio_pull_down((uint)_relSck);
+#endif
+}
+
+void ICM42688P::activateSpiPinRelease() {
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (_relActive) return;
+  if (!_spiStarted || _bus != BUS_SPI || _csPin < 0) return;  // CS must be ours to order it
+  if (!spiPinsValid(_relSck, _relMosi)) return;
+  applySckIdlePull();
+  gpio_disable_pulls((uint)_relMosi);
+  gpio_set_function((uint)_relSck, GPIO_FUNC_NULL);
+  gpio_set_function((uint)_relMosi, GPIO_FUNC_NULL);
+  _relActive = true;
+#endif
+}
+
+void ICM42688P::deactivateSpiPinRelease() {
+#if defined(ICM_SPI_PIN_RELEASE)
+  if (!_relActive) return;
+  gpio_set_function((uint)_relSck, GPIO_FUNC_SPI);
+  gpio_set_function((uint)_relMosi, GPIO_FUNC_SPI);
+  _relActive = false;
+#endif
+}
+
+bool ICM42688P::setSpiPinRelease(int8_t sckPin, int8_t mosiPin) {
+  _relConfigured = true;
+  deactivateSpiPinRelease();   // Hand the old pins back before switching
+
+  if (!spiPinsValid(sckPin, mosiPin)) {
+    if (_debug && (sckPin >= 0 || mosiPin >= 0)) {
+      Serial.println(F("ICM: setSpiPinRelease() - unsupported core or not an SCK/TX pin pair."));
+    }
+    _relSck = -1;
+    _relMosi = -1;
+    return false;
+  }
+
+  _relSck = sckPin;
+  _relMosi = mosiPin;
+  activateSpiPinRelease();     // No-op until begin() has started SPI
+  return true;
+}
+
+bool ICM42688P::isSpiPinReleaseActive() { return _relActive; }
+
+bool ICM42688P::setSpiMode(uint8_t mode) {
+  if (mode != (uint8_t)SPI_MODE0 && mode != (uint8_t)SPI_MODE3) return false;
+  _spiMode = mode;
+  if (_relActive) applySckIdlePull();
+  return true;
+}
+
+uint8_t ICM42688P::getSpiMode() { return _spiMode; }
+
+// ---------------------------------------------------------------------------
+// Sleep / wake
+// ---------------------------------------------------------------------------
+
+void ICM42688P::sleep() {
+  if (_sleeping) return;
+  // The gyro must have been on for 45 ms before it may be switched off again.
+  uint32_t onFor = millis() - _powerOnMs;
+  if (onFor < ICM42688_GYRO_MIN_ON_MS) delay(ICM42688_GYRO_MIN_ON_MS - onFor);
+
+  writeRegister(ICM42688_REG_PWR_MGMT0, ICM42688_PWR_SENSORS_OFF);
+  invalidateFIFOBuffer();
+  _sleeping = true;
+}
+
+bool ICM42688P::wake() {
+  if (!_sleeping) return true;
+
+  writeRegister(ICM42688_REG_PWR_MGMT0, _pwrMgmt0);
+  _powerOnMs = millis();
+  delayMicroseconds(ICM42688_PWR_WRITE_HOLDOFF_US + 100);  // No writes for 200 us
+  _sleeping = false;
+
+  if (readRegister(ICM42688_REG_WHO_AM_I) != WHO_AM_I_EXPECTED) return false;
+
+  // The registers survive sleep, but re-applying them costs a handful of writes
+  // and guarantees the state the driver's scale factors assume - including
+  // after a sketch has poked the chip directly in the meantime.
+  applyInterfaceConfig();
+  setAccelFS(_accelFs);
+  setGyroFS(_gyroFs);
+  setFIFOMode(_fifoMode);       // Also re-applies the ODR (enforceBandwidthLimit)
+
+  delay(ICM42688_GYRO_STARTUP_MS);
+  flushFIFO();                  // Drop samples taken while the gyro was settling
+  return true;
+}
+
+bool ICM42688P::isSleeping() { return _sleeping; }
+
 void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    spiSelect();
     SPI.transfer(startReg | 0x80); 
     for(size_t i=0; i<len; i++) buffer[i] = SPI.transfer(0x00);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(startReg);
@@ -128,12 +384,10 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
 
 void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    spiSelect();
     SPI.transfer(reg & 0x7F); 
     SPI.transfer(data);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(reg); 
@@ -145,12 +399,10 @@ void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
 uint8_t ICM42688P::readRegister(uint8_t reg) {
   uint8_t data = 0;
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    spiSelect();
     SPI.transfer(reg | 0x80); 
     data = SPI.transfer(0x00);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(reg); 
@@ -266,6 +518,7 @@ void ICM42688P::setODR(ICM_ODR odr) {
 void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
   if (_fifoMode == FIFO_20BIT_HIRES) fs = AFS_16G;
 
+  _accelFs = fs;
   uint8_t conf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0x1F;
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, (conf & 0x1F) | (fs << 5));
   switch(fs) {
@@ -279,6 +532,7 @@ void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
 void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
   if (_fifoMode == FIFO_20BIT_HIRES) fs = GFS_2000DPS;
 
+  _gyroFs = fs;
   uint8_t conf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0x1F;
   writeRegister(ICM42688_REG_GYRO_CONFIG0, (conf & 0x1F) | (fs << 5));
   switch(fs) {
@@ -330,6 +584,9 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   }
 
   if (mode != FIFO_NONE) {
+    // UI_SIFS_CFG (bits 1:0) rides along untouched: in BUS_SPI it holds the
+    // "disable I2C" setting from applyInterfaceConfig().
+    //
     // FIFO_COUNT must report BYTES, big-endian, because that is what
     // availablePackets() and fillFIFOBuffer() decode. Both are the power-on
     // defaults, but a sketch (or a previous library) may have changed them, and

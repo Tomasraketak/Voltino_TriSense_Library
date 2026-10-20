@@ -57,10 +57,32 @@
 // drain stalls exactly when the FIFO is at its fullest.
 #define ICM42688_FIFO_COUNT_MAX 2080
 
-// INTF_CONFIG0 (0x4C) - FIFO count format.
+// INTF_CONFIG0 (0x4C, bank 0) - FIFO count format and serial interface select.
+// Bit layout per ICM-42688-P datasheet DS-000347, register map section
+// "INTF_CONFIG0" (reset value 0x30):
+//   bit 7    FIFO_HOLD_LAST_DATA_EN
+//   bit 6    FIFO_COUNT_REC      1 = count in records, 0 = count in bytes
+//   bit 5    FIFO_COUNT_ENDIAN   1 = big endian (reset value)
+//   bit 4    SENSOR_DATA_ENDIAN  1 = big endian (reset value)
+//   bit 3:2  reserved
+//   bit 1:0  UI_SIFS_CFG         0x = reserved, 10 = disable SPI, 11 = disable I2C
 #define ICM42688_REG_INTF_CONFIG0       0x4C
 #define ICM42688_BIT_FIFO_COUNT_REC     0x40  // 1 = count in records, 0 = count in BYTES
 #define ICM42688_BIT_FIFO_COUNT_ENDIAN  0x20  // 1 = big endian (power-on default)
+#define ICM42688_MASK_UI_SIFS_CFG       0x03
+#define ICM42688_UI_SIFS_DISABLE_I2C    0x03  // 0b11
+
+// PWR_MGMT0 (0x4E). 0x0F = gyro + accel in Low Noise mode; 0x00 = both off
+// (sleep). Datasheet timing rules this driver honours:
+//   - after switching the gyro/accel on from OFF, no register writes for 200 us;
+//   - the gyro must stay on for at least 45 ms once enabled;
+//   - gyro start-up from sleep to valid data is 30 ms (typ.), the accel's is
+//     shorter, so the gyro sets the wait after wake().
+#define ICM42688_PWR_SENSORS_LN         0x0F
+#define ICM42688_PWR_SENSORS_OFF        0x00
+#define ICM42688_PWR_WRITE_HOLDOFF_US   200
+#define ICM42688_GYRO_MIN_ON_MS         45
+#define ICM42688_GYRO_STARTUP_MS        30
 
 // FIFO_CONFIG1 (0x5F) bit 6. With this clear, a read that does not consume the
 // whole FIFO is not resumable: the next read restarts from the beginning.
@@ -133,6 +155,41 @@ public:
   bool begin(ICM_BUS busType, int8_t csPin = -1, uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sckSclPin = -1, int8_t misoSdaPin = -1, int8_t mosiPin = -1);
   
   void setDebug(bool enable);
+
+  // --- SPI pin release (TriSense Pro level shifter workaround) ---
+  // On the TriSense Pro the IMU's SCLK/SDI pass through an SN74LVC2T45 whose
+  // DIR pin is the IMU's chip select. While CS is HIGH (IMU not selected) that
+  // shifter DRIVES the module's SCK and MOSI pins with the I2C bus levels, so
+  // an MCU that keeps SCK/MOSI as push-pull outputs between transactions
+  // fights it - tens of mA, almost continuously. With pin release enabled the
+  // driver gives SCK and MOSI back to the SPI peripheral only while CS is LOW
+  // and parks them as high-impedance inputs the rest of the time. See README,
+  // "SPI pin release".
+  //
+  // RP2040 / RP2350 (arduino-pico) only; on every other core this is a no-op
+  // that returns false. Pass -1 for either pin to switch it off. May be called
+  // before or after begin(). If it is never called, begin() enables it on its
+  // own whenever the pins are known: passed to begin(), or unambiguously
+  // readable from the GPIO function registers after SPI.begin().
+  // Returns true if release is (or, before begin(), will be) active.
+  bool setSpiPinRelease(int8_t sckPin, int8_t mosiPin);
+  bool isSpiPinReleaseActive();
+
+  // SPI_MODE0 (default, as before) or SPI_MODE3 - the ICM-42688-P supports
+  // both. Mode 3 idles SCK HIGH, the same level as an idle I2C SCL, so flipping
+  // CS does not put a LOW edge onto the module's I2C bus. Returns false (and
+  // changes nothing) for any other mode. Takes effect on the next transaction.
+  bool setSpiMode(uint8_t mode);
+  uint8_t getSpiMode();
+
+  // --- Power ---
+  // sleep(): accel + gyro off (PWR_MGMT0 = 0x00). Register contents are kept.
+  // wake(): restores the previous power mode, full-scale ranges, FIFO mode and
+  // ODR, waits for the gyro to start up and flushes the FIFO so no stale or
+  // start-up samples are handed out. Returns false if the chip does not answer.
+  void sleep();
+  bool wake();
+  bool isSleeping();
 
   // Selects the I2C bus for BUS_I2C mode. Must be called BEFORE begin().
   // Ignored in BUS_SPI mode. The whole TriSense module shares one bus, so
@@ -271,6 +328,21 @@ private:
   int8_t _csPin;
   uint8_t _i2cAddr;
   uint32_t _spiFreq;
+  uint8_t _spiMode;
+
+  // SPI pin release state (see setSpiPinRelease()).
+  int8_t _relSck = -1;
+  int8_t _relMosi = -1;
+  bool _relConfigured = false;   // setSpiPinRelease() was called - no auto-detect
+  bool _relActive = false;       // Pins are currently being released between transactions
+  bool _spiStarted = false;
+
+  // Remembered so wake() can put everything back.
+  ICM_ACCEL_FS _accelFs;
+  ICM_GYRO_FS _gyroFs;
+  uint8_t _pwrMgmt0;
+  bool _sleeping = false;
+  uint32_t _powerOnMs = 0;
   // _requestedOdr is what the sketch asked for; _odr is what the bus can
   // actually sustain in the current FIFO mode. Keeping them apart lets the
   // requested rate be restored when the packet size (and so the bandwidth
@@ -324,6 +396,21 @@ private:
   uint8_t fillFIFOBuffer();                        // Refill from hardware; returns packets loaded
   void readFIFOBytes(uint8_t *buf, size_t len);    // Bulk FIFO_DATA read (chunked on I2C)
   void invalidateFIFOBuffer();
+
+  // Every SPI transaction goes through these two, so the CS / pin-release
+  // ordering lives in exactly one place.
+  void spiSelect();
+  void spiDeselect();
+  bool spiPinsValid(int8_t sck, int8_t mosi);
+  bool detectSpiPins(int8_t &sck, int8_t &mosi);
+  void activateSpiPinRelease();
+  void deactivateSpiPinRelease();
+  void applySckIdlePull();
+
+  // Soft reset + WHO_AM_I + interface setup. The only place that resets the
+  // chip, so the I2C-disable can never be lost to a reset.
+  bool resetDevice();
+  void applyInterfaceConfig();
 
   void writeRegister(uint8_t reg, uint8_t val);
   uint8_t readRegister(uint8_t reg);

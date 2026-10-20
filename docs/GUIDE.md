@@ -94,6 +94,11 @@ persistent equivalent — there, initialise the IMU directly with
 `sensor.imu.begin()` and pass the SPI pins explicitly. AVR pins are fixed in
 hardware. See `examples/CustomPins`.
 
+On RP2040 / RP2350 the IMU driver also releases SCK and MOSI between
+transactions (README, *SPI pin release*). It finds the pins by itself after
+`SPI.begin()`; if you remapped SPI and want to be explicit, add
+`sensor.imu.setSpiPinRelease(2, 3);` before `beginAll()`.
+
 ---
 
 ## 3. First sketch
@@ -493,7 +498,10 @@ Check in this order:
 
 1. **Power.** The BMP580 in particular is fussy about a clean 3V3.
 2. **Addresses.** Scan the bus with an I2C scanner. Expect `0x68` or `0x69`
-   (IMU), `0x0C` (magnetometer), `0x46` or `0x47` (barometer).
+   (IMU), `0x0C` (magnetometer), `0x46` or `0x47` (barometer). After a
+   successful `MODE_HYBRID` start the IMU is **gone** from the I2C bus — the
+   driver switches its I2C interface off — so a scan then shows only `0x0C` and
+   `0x46`/`0x47`. That is expected.
 3. **Pull-ups.** I2C needs them — 4.7 kΩ is the usual choice. Many breakout
    boards have them; a bare module may not.
 4. **The right mode.** `MODE_HYBRID` with a wrong CS pin fails silently in a way
@@ -533,6 +541,42 @@ If those two match, nothing is being lost, whatever the event counter says.
 §4 and §5: measure how long your slowest iteration takes, compare it against the
 deadline table, and either shorten the loop or lower the ODR. In nearly every
 case the culprit is a blocking `Serial.print()`.
+
+### The module draws tens of mA more than it should (MODE_HYBRID)
+
+On the TriSense Pro the SN74LVC2T45 level shifter in the SCK/MOSI path drives
+the module's SCK and MOSI pins whenever the IMU's CS is HIGH. If the MCU drives
+them too, the two outputs fight: 30–50 mA in total, and a multimeter on SCK or
+MOSI shows an in-between level of about 1–2 V instead of 0 V or 3.3 V.
+
+- **RP2040 / RP2350:** the driver releases the pins between transactions.
+  Check `sensor.imu.isSpiPinReleaseActive()`. If it is `false`, the pins were
+  not detected (usually because a second SPI bus is in use) — name them with
+  `sensor.imu.setSpiPinRelease(sck, mosi)`.
+- **Other cores:** pin release is not implemented. `setSpiMode(SPI_MODE3)`
+  takes away the SCK half of the fight while idle; `MODE_I2C` avoids SPI
+  altogether.
+
+### SPI bus cannot be shared
+
+The SCK and MOSI lines of the TriSense Pro **cannot be shared with another SPI
+device**. Whenever the IMU's CS is HIGH — i.e. exactly when you would be
+talking to the other device — the module's SN74LVC2T45 drives SCK and MOSI with
+the levels of its I2C bus. The other device's clock and data would be fought
+over, and with SPI pin release active the MCU does not drive SCK/MOSI outside
+the IMU's own transactions at all. Put other SPI devices on a second SPI
+peripheral (e.g. `SPI1`) with their own pins.
+
+This is a property of the board, not something the library can work around.
+For the next hardware revision:
+
+- **Run the IMU at 3.3 V and use SPI only.** The ICM-42688-P accepts VDDIO up to
+  3.6 V, so the level shifters (and the I2C path to the IMU) can go entirely;
+  SCK/MOSI/MISO become ordinary SPI lines that can be shared.
+- **Or keep 1.8 V, but use an SN74AVC4T245 with ~OE driven from CS1.8** for
+  SCK/MOSI (and MISO): with CS HIGH its outputs are high-impedance in both
+  directions, so nothing drives the connector side while the IMU is
+  deselected.
 
 ### Yaw drifts, roll and pitch are fine
 
@@ -605,7 +649,7 @@ runtime for no measurable gain.
 ## Further reading
 
 - [README](../README.md) — feature overview and full API reference
-- `examples/` — eight worked sketches, from raw reads to GPS/INS fusion
+- `examples/` — nine worked sketches, from raw reads to GPS/INS fusion
 - [ICM-42688-P datasheet](https://invensense.tdk.com/products/motion-tracking/6-axis/icm-42688-p/)
 - [AK09918C datasheet](https://www.akm.com/global/en/products/electronic-compass/ak09918c/)
 - [BMP580 datasheet](https://www.bosch-sensortec.com/products/environmental-sensors/pressure-sensors/bmp580/)

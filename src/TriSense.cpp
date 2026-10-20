@@ -5,33 +5,80 @@ TriSense::TriSense() {
 }
 
 bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
+  TriSenseConfig defaults;
+  return beginAllImpl(mode, defaults, spiCsPin, spiFreq, wire);
+}
+
+bool TriSense::beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
+  return beginAllImpl(mode, config, spiCsPin, spiFreq, wire);
+}
+
+bool TriSense::beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire) {
   _mode = mode;
   _wire = &wire;
+  _sleeping = false;
 
   // One shared bus for the whole module. Started once here, so the individual
   // drivers never have to guess which TwoWire instance they are on.
   _wire->begin();
 
   if (!bmp.begin(BMP580_PRIMARY_I2C_ADDR, *_wire)) return false;
-  if (!mag.begin(AK_ODR_100HZ, *_wire)) return false;
+  if (!mag.begin(config.magOdr, *_wire)) return false;
 
   if (_mode == MODE_I2C) {
     imu.setWire(*_wire);
     if (!imu.begin(BUS_I2C)) return false;
-    imu.setODR(DEFAULT_IMU_ODR); 
+    imu.setODR(config.imuOdr ? config.imuOdr : DEFAULT_IMU_ODR); 
   } else {
+    // Explicit pins switch SPI pin release on (or, both -1 with a sketch that
+    // already called imu.setSpiPinRelease(), leave that choice alone).
+    if (config.spiSckPin >= 0 && config.spiMosiPin >= 0) {
+      imu.setSpiPinRelease(config.spiSckPin, config.spiMosiPin);
+    }
+    // Only a non-default mode is pushed, so a sketch that called
+    // imu.setSpiMode() itself before beginAll() keeps its choice.
+    if (config.spiMode != (uint8_t)SPI_MODE0) imu.setSpiMode(config.spiMode);
     if (!imu.begin(BUS_SPI, spiCsPin, spiFreq)) return false;
-    imu.setODR(DEFAULT_IMU_SPI_ODR); 
+    imu.setODR(config.imuOdr ? config.imuOdr : DEFAULT_IMU_SPI_ODR); 
   }
 
-  imu.setFIFOMode(FIFO_16BIT);
+  imu.setFIFOMode(config.imuFifoMode);
 
-  bmp.setOversampling(BMP580_OSR_x2, BMP580_OSR_x2);
-  bmp.setODR(BMP580_ODR_240Hz);
-  bmp.setPowerMode(BMP580_MODE_NORMAL);
-  mag.setODR(AK_ODR_100HZ); 
+  // Without the odr_is_valid check an impossible OSR/ODR pair would silently
+  // run at other settings than the ones asked for.
+  _baroValid = bmp.configure(config.baroOsrP, config.baroOsrT, config.baroOdr, BMP580_MODE_NORMAL);
+  if (!_baroValid && _debug) {
+    Serial.println(F("Voltino TriSense WARNING: BMP580 OSR/ODR combination is not achievable "
+                     "(odr_is_valid = 0) - the sensor runs with its effective settings. "
+                     "Lower the OSR or the ODR."));
+  }
+  mag.setODR(config.magOdr); 
   
   return true;
+}
+
+void TriSense::setDebug(bool enable) {
+  _debug = enable;
+  imu.setDebug(enable);
+}
+
+void TriSense::sleep() {
+  if (_sleeping) return;
+  imu.sleep();
+  _magModeBeforeSleep = mag.getMode();
+  mag.setMode(MODE_POWER_DOWN);
+  bmp.sleep();
+  _sleeping = true;
+}
+
+bool TriSense::wake() {
+  if (!_sleeping) return true;
+  bmp.wake();
+  if (_magModeBeforeSleep != MODE_POWER_DOWN) {
+    mag.setODR((AK09918_ODR)_magModeBeforeSleep);
+  }
+  _sleeping = false;
+  return imu.wake();   // Last: it waits out the gyro start-up time
 }
 
 bool TriSense::beginBMP(uint8_t addr, TwoWire &wire) { _wire = &wire; return bmp.begin(addr, wire); }
@@ -488,7 +535,8 @@ void TriSenseFusion::quaternionToEuler(FUSION_MATH_TYPE& roll, FUSION_MATH_TYPE&
 void TriSenseFusion::getOrientationDegrees(float& roll, float& pitch, float& yaw) {
   FUSION_MATH_TYPE r, p, y; quaternionToEuler(r, p, y); 
   roll = (float)(r * 180.0 / PI); pitch = (float)(p * 180.0 / PI); yaw = (float)(y * 180.0 / PI); 
-  if (yaw < 0) yaw += 360.0f; if (yaw >= 360.0f) yaw -= 360.0f;
+  if (yaw < 0) yaw += 360.0f;
+  if (yaw >= 360.0f) yaw -= 360.0f;
 }
 
 // Magnetometer-only heading (tilt-compensated using the fusion's current roll/
@@ -519,7 +567,8 @@ void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE a
   FUSION_MATH_TYPE by = my * cos(phi) - mz * sin(phi); 
   FUSION_MATH_TYPE bx = mx * cos(theta) + my * sin(theta) * sin(phi) + mz * sin(theta) * cos(phi);
   yaw = atan2(-by, bx) * 180.0 / PI + (FUSION_MATH_TYPE)magneticDeclination; 
-  if (yaw < 0) yaw += 360.0; if (yaw >= 360.0) yaw -= 360.0;
+  if (yaw < 0) yaw += 360.0;
+  if (yaw >= 360.0) yaw -= 360.0;
 }
 
 void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
@@ -780,10 +829,12 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   FUSION_MATH_TYPE yaw_rad = atan2(siny_cosp, cosy_cosp);
   
   FUSION_MATH_TYPE yaw_deg = yaw_rad * 180.0 / (FUSION_MATH_TYPE)PI; 
-  if (yaw_deg < 0) yaw_deg += 360.0; if (yaw_deg >= 360.0) yaw_deg -= 360.0;
+  if (yaw_deg < 0) yaw_deg += 360.0;
+  if (yaw_deg >= 360.0) yaw_deg -= 360.0;
   
   FUSION_MATH_TYPE delta_yaw_deg = yaw_corr - yaw_deg; 
-  if (delta_yaw_deg > 180.0) delta_yaw_deg -= 360.0; if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
+  if (delta_yaw_deg > 180.0) delta_yaw_deg -= 360.0;
+  if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
   FUSION_MATH_TYPE delta_yaw_rad = delta_yaw_deg * (FUSION_MATH_TYPE)PI / 180.0;
   
   if (_dynamicBiasEnabled) {

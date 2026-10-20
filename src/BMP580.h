@@ -13,6 +13,12 @@
 #define BMP580_DSP_CONFIG 0x35  // IIR Filter config register
 #define BMP580_OSR_CONFIG 0x36
 #define BMP580_ODR_CONFIG 0x37
+// OSR_EFF (0x38): effective OSR in use (bits 2:0 temperature, 5:3 pressure)
+// and bit 7 odr_is_valid - 1 when the requested ODR can be met with the
+// requested OSR. When it cannot, the part does not refuse the setting: it runs
+// with the effective values instead, which is easy to miss.
+#define BMP580_OSR_EFF 0x38
+#define BMP580_BIT_ODR_IS_VALID 0x80
 #define BMP580_TEMP_DATA_XLSB 0x1D  // Burst read start
 
 // IIR Filter coefficients
@@ -97,6 +103,20 @@ class BMP580 {
   void setODR(BMP580_ODR odr);
   void setPowerMode(BMP580_Mode mode);
   void setIIRFilter(BMP580_IIR iir_p, BMP580_IIR iir_t);
+
+  // Writes OSR and ODR from STANDBY (where the datasheet wants them changed),
+  // then enters `mode`. Returns isODRValid() for NORMAL mode, true otherwise.
+  bool configure(BMP580_OSR osr_p, BMP580_OSR osr_t, BMP580_ODR odr, BMP580_Mode mode = BMP580_MODE_NORMAL);
+
+  // odr_is_valid from OSR_EFF: false means the OSR/ODR combination cannot be
+  // met and the sensor is running with different, effective settings.
+  // Meaningful in NORMAL mode.
+  bool isODRValid();
+
+  // sleep(): STANDBY, remembering the configuration. wake(): restores the OSR,
+  // ODR and power mode that were active before sleep().
+  void sleep();
+  void wake();
   
   float readTemperature();
   float readPressure();
@@ -111,6 +131,11 @@ class BMP580 {
   float _cachedPress = 0.0f;
   unsigned long _lastReadTimeUs = 0;
   unsigned long _cacheTimeoutUs = 0;
+
+  // Configuration saved by sleep() for wake().
+  uint8_t _savedOsr = 0;
+  uint8_t _savedOdr = 0;
+  bool _sleeping = false;
 
   // Internal helpers
   void writeRegister(uint8_t reg, uint8_t value);

@@ -120,6 +120,37 @@ enum TriSenseMode {
   MODE_HYBRID   
 };
 
+// Optional start-up configuration for TriSense::beginAll(). Every default is
+// what beginAll() has always used, so a default-constructed config changes
+// nothing. Set only the fields you care about:
+//
+//   TriSenseConfig cfg;
+//   cfg.magOdr  = AK_ODR_10HZ;
+//   cfg.baroOdr = BMP580_ODR_10Hz;
+//   sensor.beginAll(MODE_HYBRID, cfg);
+struct TriSenseConfig {
+  // Magnetometer continuous-measurement rate.
+  AK09918_ODR magOdr = AK_ODR_100HZ;
+
+  // Barometer. The OSR/ODR pair must be achievable together - check
+  // sensor.bmp.isODRValid() (or TriSense::baroConfigValid()) after beginAll().
+  BMP580_OSR baroOsrP = BMP580_OSR_x2;
+  BMP580_OSR baroOsrT = BMP580_OSR_x2;
+  BMP580_ODR baroOdr  = BMP580_ODR_240Hz;
+
+  // IMU. imuOdr = 0 keeps the platform default (DEFAULT_IMU_ODR in MODE_I2C,
+  // DEFAULT_IMU_SPI_ODR in MODE_HYBRID).
+  ICM_ODR imuOdr = (ICM_ODR)0;
+  ICM_FIFO_MODE imuFifoMode = FIFO_16BIT;
+
+  // MODE_HYBRID only. SCK/MOSI pins for SPI pin release (RP2040/RP2350, see
+  // ICM42688P::setSpiPinRelease()). -1 = let the driver detect them.
+  int8_t spiSckPin = -1;
+  int8_t spiMosiPin = -1;
+  // MODE_HYBRID only. SPI_MODE0 (default) or SPI_MODE3.
+  uint8_t spiMode = (uint8_t)SPI_MODE0;
+};
+
 class TriSense {
 public:
   BMP580 bmp;
@@ -135,6 +166,10 @@ public:
   // (or wire.setPins() on ESP32) BEFORE this - beginAll() calls wire.begin()
   // without pin arguments and therefore keeps whatever mapping you configured.
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire);
+
+  // Same, with the sensor rates (and the SPI pin release pins) taken from
+  // `config` instead of the built-in defaults.
+  bool beginAll(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000, TwoWire &wire = Wire);
   
   bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR, TwoWire &wire = Wire);
   bool beginMAG(TwoWire &wire = Wire);
@@ -142,6 +177,24 @@ public:
 
   // The I2C bus every sensor on the module is attached to.
   TwoWire& getWire() { return *_wire; }
+
+  // Prints configuration warnings to Serial (also enabled by compiling with
+  // -DTRISENSE_DEBUG) and forwards to the IMU driver.
+  void setDebug(bool enable);
+
+  // False if the barometer reported at beginAll() that its OSR/ODR pair cannot
+  // be met (BMP580 odr_is_valid = 0) and it is running with other settings.
+  bool baroConfigValid() { return _baroValid; }
+
+  // --- Power ---
+  // sleep(): IMU accel + gyro off, magnetometer power-down, barometer standby.
+  // wake(): restores every sensor's previous rate, ranges and FIFO setup and
+  // waits for the gyro to start up. Returns false if the IMU does not answer.
+  // After a wake() a running fusion filter sees one long gap - call
+  // initOrientation() again if the board moved while asleep.
+  void sleep();
+  bool wake();
+  bool isSleeping() { return _sleeping; }
 
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = DEFAULT_CALIBRATION_SAMPLES);
@@ -162,6 +215,16 @@ public:
 private:
   TriSenseMode _mode;
   TwoWire* _wire = &Wire;
+  bool _baroValid = true;
+#if defined(TRISENSE_DEBUG)
+  bool _debug = true;
+#else
+  bool _debug = false;
+#endif
+  bool _sleeping = false;
+  uint8_t _magModeBeforeSleep = AK_ODR_100HZ;
+
+  bool beginAllImpl(TriSenseMode mode, const TriSenseConfig &config, uint8_t spiCsPin, uint32_t spiFreq, TwoWire &wire);
 
   // Last known good reading of each block, plus when it was taken.
   TriSenseDataSnapshot _last;

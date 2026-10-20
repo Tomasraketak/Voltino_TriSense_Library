@@ -13,6 +13,7 @@ ICM42688P	KEYWORD1
 SimpleTriFusion	KEYWORD1
 TriSense	KEYWORD1
 TriSenseDataSnapshot	KEYWORD1
+TriSenseConfig	KEYWORD1
 TriSenseFusion	KEYWORD1
 AK_ODR	KEYWORD1
 AccelUnit	KEYWORD1
@@ -36,6 +37,7 @@ applyMagCalibration	KEYWORD2
 autoCalibrateAccel	KEYWORD2
 autoCalibrateGyro	KEYWORD2
 availablePackets	KEYWORD2
+baroConfigValid	KEYWORD2
 beginAll	KEYWORD2
 beginBMP	KEYWORD2
 beginI2C	KEYWORD2
@@ -46,6 +48,7 @@ calibrateAccelStatic	KEYWORD2
 clampSampleDt	KEYWORD2
 complementaryCorrection	KEYWORD2
 computeHeading	KEYWORD2
+configure	KEYWORD2
 enableLightweightGravity	KEYWORD2
 enforceBandwidthLimit	KEYWORD2
 fifoOverflowed	KEYWORD2
@@ -76,15 +79,20 @@ getGyroSoftwareOffset	KEYWORD2
 getLinearAcceleration	KEYWORD2
 getLostPacketCount	KEYWORD2
 getMagHeadingDegrees	KEYWORD2
+getMode	KEYWORD2
 getODRHz	KEYWORD2
 getOrientationDegrees	KEYWORD2
 getRequestedODRHz	KEYWORD2
 getSnapshot	KEYWORD2
+getSpiMode	KEYWORD2
 getWire	KEYWORD2
 gyroIntegration	KEYWORD2
 initOrientation	KEYWORD2
 invSqrt	KEYWORD2
 invalidateFIFOBuffer	KEYWORD2
+isODRValid	KEYWORD2
+isSleeping	KEYWORD2
+isSpiPinReleaseActive	KEYWORD2
 nextFIFOPacket	KEYWORD2
 quaternionToEuler	KEYWORD2
 readAltitude	KEYWORD2
@@ -135,6 +143,9 @@ setMountOrientation	KEYWORD2
 setODR	KEYWORD2
 setOversampling	KEYWORD2
 setPowerMode	KEYWORD2
+setSpiMode	KEYWORD2
+setSpiPinRelease	KEYWORD2
+sleep	KEYWORD2
 setWire	KEYWORD2
 setYawKi	KEYWORD2
 softReset	KEYWORD2
@@ -144,6 +155,7 @@ unremapAxes	KEYWORD2
 update	KEYWORD2
 updateCache	KEYWORD2
 updateTimeoutUs	KEYWORD2
+wake	KEYWORD2
 writeRegister	KEYWORD2
 x	KEYWORD2
 y	KEYWORD2
@@ -240,6 +252,8 @@ ICM42688_BIT_FIFO_COUNT_REC	LITERAL1
 ICM42688_BIT_FIFO_RESUME_PARTIAL_RD	LITERAL1
 ICM42688_BIT_INT_TDEASSERT_DISABLE	LITERAL1
 ICM42688_BIT_INT_TPULSE_DURATION	LITERAL1
+ICM42688_MASK_UI_SIFS_CFG	LITERAL1
+ICM42688_UI_SIFS_DISABLE_I2C	LITERAL1
 ICM42688_FIFO_BYTES	LITERAL1
 ICM42688_FIFO_COUNT_MAX	LITERAL1
 ICM42688_INT_SOURCE0_FIFO_FULL	LITERAL1

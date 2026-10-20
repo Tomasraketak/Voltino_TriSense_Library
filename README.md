@@ -6,6 +6,8 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
+> **New in v1.6.0:** SPI pin release on RP2040/RP2350 — removes a 30–50 mA cross-conduction between the MCU and the TriSense Pro's SCK/MOSI level shifter ([details](#spi-pin-release-trisense-pro-level-shifter)), I2C interface of the IMU disabled in SPI mode, optional SPI mode 3, `TriSenseConfig` for magnetometer/barometer/IMU rates, `TriSense::sleep()` / `wake()`, BMP580 OSR/ODR validity check, and a `LowPower` example.
+
 > **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, FIFO overflow detection, burst FIFO reads (~18× fewer bus transactions), and a custom SPI/I2C pin-mapping example.
 
 ---
@@ -535,6 +537,97 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 
 ---
 
+## SPI pin release (TriSense Pro level shifter)
+
+### The problem
+
+On the TriSense Pro the ICM-42688-P runs at 1.8 V, so its SPI lines pass through level shifters. The one on **SCK and MOSI is an SN74LVC2T45 whose DIR pin is the IMU's chip select (CS1.8)**:
+
+| CS | SN74LVC2T45 (SCK, MOSI) | 74LVC1T45 (MISO) | TXS0102 (I2C ↔ IMU) |
+|----|-------------------------|------------------|---------------------|
+| LOW (IMU selected) | connector → IMU. SCK/MOSI on the connector are **inputs** | IMU → connector | disabled |
+| HIGH (idle) | IMU → connector. SCK/MOSI on the connector are **driven** with the I2C bus levels | connector side is an input (Hi-Z) | IMU pins joined to the I2C bus |
+
+So whenever the IMU is *not* being talked to, the module drives its own SCK and MOSI pins. A microcontroller that keeps SCK/MOSI as push-pull outputs after `SPI.begin()` — which is every Arduino core — drives against it. SCK idles LOW in SPI mode 0 while the I2C SCL it is mirrored from idles HIGH, so the two outputs fight practically all the time: an estimated **15–25 mA per line, 30–50 mA in total**. During an actual IMU transaction (CS LOW) everything is wired the right way round; only the idle time is the problem.
+
+### The fix: release the pins between transactions
+
+With pin release enabled the driver does every SPI transaction in this order:
+
+1. `SPI.beginTransaction()`
+2. CS → LOW — the shifter turns round, its connector side becomes an input
+3. SCK and MOSI → SPI function
+4. transfer
+5. SCK and MOSI → released (`GPIO_FUNC_NULL`, high impedance)
+6. CS → HIGH — the shifter drives the pins again, now with nothing driving back
+7. `SPI.endTransaction()`
+
+The pins are released right after `SPI.begin()` too, so the short never flows, not even during the reset at start-up. MISO is untouched. A FIFO burst stays **one** transaction with one attach/release pair, however many bytes it moves, so the throughput cost is a few register writes per transaction. While released, SCK is held at its idle level by the internal pull resistor (pull-down in mode 0, pull-up in mode 3) so the brief moments in which it floats cannot become a clock edge.
+
+| Platform | Pin release |
+|----------|-------------|
+| **RP2040 / RP2350** (arduino-pico) | ✅ On by default whenever the pins are known |
+| ESP32, AVR, SAMD, others | ❌ No-op: SCK/MOSI stay driven between transactions, as before. On ESP32 it could be done through the GPIO matrix (`pinMatrixOutDetach()`), but the re-attach API differs between core 2.x and 3.x and is not implemented. SPI mode 3 (below) at least removes the SCK half of the fight at idle. |
+
+**How the driver knows the pins** (RP2040/RP2350):
+
+- pins passed to `imu.begin(BUS_SPI, cs, freq, addr, sck, miso, mosi)`, or
+- `imu.setSpiPinRelease(sck, mosi)` — before or after `begin()`, or
+- `TriSenseConfig::spiSckPin` / `spiMosiPin` with `beginAll(mode, config, ...)`, or
+- otherwise detected after `SPI.begin()`: the pins in SPI function are read back from the GPIO function registers and used if there is exactly one SCK and one TX pin. With a second SPI bus in use this is ambiguous and release stays off — pass the pins explicitly then.
+
+The pin numbers are checked against the RP2040/RP2350 GPIO function table (SCK must be a pin with `n % 4 == 2`, MOSI `n % 4 == 3`, same SPI instance), so a wrong number can never route an SPI signal onto an unrelated pin.
+
+```cpp
+sensor.imu.setSpiPinRelease(2, 3);   // SCK = GPIO2, MOSI = GPIO3
+sensor.beginAll(MODE_HYBRID, 17, 10000000);
+Serial.println(sensor.imu.isSpiPinReleaseActive());
+
+sensor.imu.setSpiPinRelease(-1, -1); // Off: SCK/MOSI go back to the SPI peripheral
+```
+
+> **Consequence:** with release active, SCK and MOSI are *not* driven outside the IMU's own transactions, so other SPI devices on the same pins will get no clock. Sharing these pins is not possible on the TriSense Pro anyway, because the shifter drives them whenever the IMU's CS is HIGH — see [GUIDE, Troubleshooting](docs/GUIDE.md#spi-bus-cannot-be-shared).
+
+### I2C interface of the IMU is switched off in SPI mode
+
+With CS HIGH the TXS0102 also joins the IMU's pins to the module's I2C bus, so a stock ICM-42688-P answers at 0x68 there and decodes all the magnetometer / barometer traffic as I2C. In `BUS_SPI` the driver therefore sets `INTF_CONFIG0.UI_SIFS_CFG = 0b11` (disable I2C, datasheet DS-000347, register INTF_CONFIG0 bits 1:0) right after WHO_AM_I succeeds, and again after every soft reset. It is a read-modify-write, so the FIFO count format bits stay as they are. `BUS_I2C` / `MODE_I2C` never touch it.
+
+### SPI mode 3 (optional)
+
+```cpp
+sensor.imu.setSpiMode(SPI_MODE3);    // or TriSenseConfig::spiMode = SPI_MODE3
+```
+
+The ICM-42688-P supports modes 0 and 3; the default stays `SPI_MODE0` for backward compatibility. Mode 3 idles SCK **HIGH** — the same level as an idle I2C SCL. When CS rises, the TXS0102 connects the IMU's SCLK pin (which still holds the last SCK level) to the I2C bus; in mode 0 that level is LOW and puts a LOW edge onto SCL, in mode 3 it is HIGH and nothing happens. On cores without pin release, mode 3 also stops SCK from fighting the shifter while idle (MOSI still can).
+
+---
+
+## Low-power operation
+
+```cpp
+TriSenseConfig cfg;                  // Defaults = the classic beginAll() rates
+cfg.magOdr   = AK_ODR_10HZ;          // default AK_ODR_100HZ
+cfg.baroOsrP = BMP580_OSR_x8;        // default x2
+cfg.baroOsrT = BMP580_OSR_x1;        // default x2
+cfg.baroOdr  = BMP580_ODR_10Hz;      // default 240 Hz
+cfg.imuOdr   = ODR_100HZ;            // default: platform's DEFAULT_IMU_(SPI_)ODR
+sensor.beginAll(MODE_HYBRID, cfg, 17, 4000000);
+
+if (!sensor.baroConfigValid()) { /* the BMP580 cannot meet this OSR/ODR pair */ }
+
+sensor.sleep();   // IMU PWR_MGMT0 = 0x00, AK09918C power-down, BMP580 standby
+sensor.wake();    // previous rates, ranges, FIFO mode restored; waits for the gyro
+```
+
+- **BMP580 OSR/ODR validity.** Not every OSR pair can run at every ODR. The BMP580 does not reject an impossible pair — it reports it through `odr_is_valid` (bit 7 of OSR_EFF, 0x38) and runs with effective settings instead. `beginAll()` reads that bit; `baroConfigValid()` / `bmp.isODRValid()` return it, and with `setDebug(true)` (or `-DTRISENSE_DEBUG`) a warning is printed. `bmp.configure(osrP, osrT, odr)` does the whole standby → OSR → ODR → normal sequence and returns the same flag.
+- **`wake()` timing.** The gyro needs about 30 ms from sleep to valid data and must stay on for at least 45 ms once enabled (datasheet); `wake()` waits out the start-up and flushes the FIFO, `sleep()` waits out the minimum on-time if needed.
+- After `wake()` a running fusion filter sees one long gap; call `initOrientation()` again if the board moved while asleep.
+- In sleep the module current is dominated by its ON LED.
+
+See [`examples/LowPower`](examples/LowPower/LowPower.ino).
+
+---
+
 ## API Reference
 
 ### `TriSense` Class
@@ -542,6 +635,11 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | Method | Description |
 |--------|-------------|
 | `beginAll(mode, csPin, freq, wire)` | Initialize all hardware (Hybrid or I2C-only). `wire` selects the shared I2C bus (default `Wire`) |
+| `beginAll(mode, config, csPin, freq, wire)` | Same, with magnetometer / barometer / IMU rates, SPI pin-release pins and SPI mode from a `TriSenseConfig` |
+| `sleep()` / `wake()` | Put all three sensors to sleep / restore their previous configuration (see [Low-power operation](#low-power-operation)) |
+| `isSleeping()` | True between `sleep()` and `wake()` |
+| `baroConfigValid()` | False if the BMP580 reported its OSR/ODR pair as not achievable at `beginAll()` |
+| `setDebug(enable)` | Print configuration warnings to `Serial` (also forwarded to the IMU driver) |
 | `beginBMP(addr, wire)` | Initialize BMP580 individually |
 | `beginMAG(wire)` | Initialize AK09918C individually |
 | `beginIMU(busType, csPin, freq, wire)` | Initialize ICM-42688-P individually |
@@ -561,6 +659,10 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `begin(busType, csPin, freq, i2cAddr, sck, miso, mosi)` | Full initialization with pin mapping |
 | `beginI2C(freq, addr, sda, scl)` | I2C-specific init |
 | `beginSPI(csPin, freq, sck, miso, mosi)` | SPI-specific init |
+| `setSpiPinRelease(sck, mosi)` | Release SCK/MOSI between transactions (RP2040/RP2350; `-1` = off). Returns `false` where unsupported |
+| `isSpiPinReleaseActive()` | True if SCK/MOSI are currently released between transactions |
+| `setSpiMode(mode)` / `getSpiMode()` | `SPI_MODE0` (default) or `SPI_MODE3` |
+| `sleep()` / `wake()` / `isSleeping()` | Accel + gyro off / back on with the previous configuration |
 | `setODR(odr)` | Set output data rate |
 | `setAccelFS(fs)` | Set accelerometer full-scale range |
 | `setGyroFS(fs)` | Set gyroscope full-scale range |
@@ -611,6 +713,9 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `setODR(odr)` | Set output data rate (0.125 Hz to 240 Hz) |
 | `setPowerMode(mode)` | Set power mode (Standby, Normal, Forced, Continuous) |
 | `setIIRFilter(iir_p, iir_t)` | Set IIR filter coefficients for pressure/temp |
+| `configure(osr_p, osr_t, odr, mode)` | Standby → OSR → ODR → `mode`; returns `isODRValid()` in normal mode |
+| `isODRValid()` | `odr_is_valid` bit: false means the OSR/ODR pair cannot be met |
+| `sleep()` / `wake()` | Standby / restore the previous OSR, ODR and power mode |
 | `readTemperature()` | Get temperature (°C) — smart-cached |
 | `readPressure()` | Get pressure (Pa) — smart-cached |
 | `readAltitude(seaLevel)` | Get altitude (m) using cached pressure |
@@ -624,6 +729,7 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `readData()` | Read magnetic data (early-exit on ST1) |
 | `setODR(odr)` | Set output data rate (10, 20, 50, or 100 Hz) |
 | `setMode(mode)` | Set operation mode (Power-down, Single, Self-test) |
+| `getMode()` | Last ODR/mode written to CNTL2 |
 | `softReset()` | Hardware reset |
 | `computeHeading(mx, my, mz, rollDeg, pitchDeg, declinationDeg)` *(static)* | Tilt-compensated heading (0–360°) from calibrated field components + roll/pitch |
 
@@ -676,6 +782,7 @@ Define these *before* including `TriSense.h` to override defaults:
 |-------|--------|
 | `FORCE_FUSION_FLOAT` | Force `FUSION_MATH_TYPE` to `float` |
 | `FORCE_FUSION_DOUBLE` | Force `FUSION_MATH_TYPE` to `double` |
+| `TRISENSE_DEBUG` | Start `TriSense` with configuration warnings enabled (same as `setDebug(true)`) |
 
 ---
 

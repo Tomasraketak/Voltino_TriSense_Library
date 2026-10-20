@@ -66,6 +66,40 @@ void BMP580::setPowerMode(BMP580_Mode mode) {
   writeRegister(BMP580_ODR_CONFIG, mode | (odr << 2));
 }
 
+bool BMP580::configure(BMP580_OSR osr_p, BMP580_OSR osr_t, BMP580_ODR odr, BMP580_Mode mode) {
+  setPowerMode(BMP580_MODE_STANDBY);
+  delay(3);  // Let a conversion already in progress finish first
+  setOversampling(osr_p, osr_t);
+  setODR(odr);
+  setPowerMode(mode);
+  if (mode != BMP580_MODE_NORMAL) return true;
+  return isODRValid();
+}
+
+bool BMP580::isODRValid() {
+  return (readRegister(BMP580_OSR_EFF) & BMP580_BIT_ODR_IS_VALID) != 0;
+}
+
+void BMP580::sleep() {
+  if (_sleeping) return;
+  _savedOsr = readRegister(BMP580_OSR_CONFIG);
+  _savedOdr = readRegister(BMP580_ODR_CONFIG);
+  setPowerMode(BMP580_MODE_STANDBY);
+  _sleeping = true;
+}
+
+void BMP580::wake() {
+  if (!_sleeping) return;
+  // Everything is written while still in STANDBY, the mode bits last. Also
+  // covers deep standby, should the part have dropped into it.
+  writeRegister(BMP580_OSR_CONFIG, _savedOsr);
+  writeRegister(BMP580_ODR_CONFIG, (uint8_t)(_savedOdr & ~0x03));  // STANDBY, saved ODR
+  writeRegister(BMP580_ODR_CONFIG, _savedOdr);
+  updateTimeoutUs((BMP580_ODR)((_savedOdr >> 2) & 0x1F));
+  _lastReadTimeUs = micros();  // The cache is stale; refresh after one ODR period
+  _sleeping = false;
+}
+
 void BMP580::setIIRFilter(BMP580_IIR iir_p, BMP580_IIR iir_t) {
   // We use read-modify-write to safely preserve other config bits (like shnd_ext) in DSP_CONFIG
   uint8_t dspConfig = readRegister(BMP580_DSP_CONFIG);
