@@ -1,5 +1,12 @@
 #include "ICM42688P_voltino.h"
 
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
+  #include <hardware/gpio.h>
+  #define ICM_SPI_RELEASE_SUPPORTED 1
+#else
+  #define ICM_SPI_RELEASE_SUPPORTED 0
+#endif
+
 ICM42688P::ICM42688P() {
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
@@ -15,6 +22,72 @@ ICM42688P::ICM42688P() {
 void ICM42688P::setDebug(bool enable) { _debug = enable; }
 
 void ICM42688P::setWire(TwoWire &wire) { _wire = &wire; }
+
+void ICM42688P::setSPIPinRelease(bool enable) { _spiRelease = enable; }
+
+// Finds which GPIOs the global SPI object (spi0 on arduino-pico) drives as
+// SCK and TX. The RP2040/RP2350 SPI mux is fixed: on GPIO n the SPI function
+// is RX/CSn/SCK/TX for n % 4 = 0/1/2/3, on spi0 when bit 3 of n is clear and
+// spi1 when it is set. So a pin muxed to SPI with n % 4 == 2 on spi0 is SCK.
+void ICM42688P::_spiDetectPins() {
+#if ICM_SPI_RELEASE_SUPPORTED
+  // A second begin() must not lose pins an earlier one already released:
+  // they read as unmuxed now, and forgetting them would leave SPI dead.
+  const int8_t prevSck = _spiSck, prevMosi = _spiMosi;
+  _spiSck = -1;
+  _spiMosi = -1;
+  if (!_spiRelease || _bus != BUS_SPI || _csPin == -1) {
+    if (prevSck != -1) {                             // hand them back
+      gpio_set_function(prevSck, GPIO_FUNC_SPI);
+      gpio_set_function(prevMosi, GPIO_FUNC_SPI);
+    }
+    return;
+  }
+  for (uint n = 0; n < NUM_BANK0_GPIOS; n++) {
+    if (gpio_get_function(n) != GPIO_FUNC_SPI) continue;
+    if ((n >> 3) & 1) continue;                      // spi1, not ours
+    if ((n & 3) == 2 && _spiSck == -1) _spiSck = (int8_t)n;
+    if ((n & 3) == 3 && _spiMosi == -1) _spiMosi = (int8_t)n;
+  }
+  if (_spiSck == -1 || _spiMosi == -1) {
+    _spiSck = prevSck;
+    _spiMosi = prevMosi;
+    if (_spiSck == -1 || _spiMosi == -1) { _spiSck = _spiMosi = -1; return; }
+  }
+  // Released from here until the first transfer.
+  gpio_set_function(_spiSck, GPIO_FUNC_NULL);
+  gpio_set_function(_spiMosi, GPIO_FUNC_NULL);
+#endif
+}
+
+// ORDER MATTERS in both helpers. CS goes LOW first, which turns the
+// module's level shifter around so its SCK/MOSI side becomes an input;
+// only then does the MCU start driving those pins. On the way out the MCU
+// lets go of them BEFORE CS goes HIGH and the shifter starts driving them.
+// Either other order leaves a moment where both sides drive the same wire.
+void ICM42688P::_spiSelect() {
+  SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
+  if (_csPin != -1) digitalWrite(_csPin, LOW);
+#if ICM_SPI_RELEASE_SUPPORTED
+  if (_spiSck != -1) {
+    gpio_set_function(_spiSck, GPIO_FUNC_SPI);
+    gpio_set_function(_spiMosi, GPIO_FUNC_SPI);
+  }
+#endif
+}
+
+void ICM42688P::_spiDeselect() {
+#if ICM_SPI_RELEASE_SUPPORTED
+  // SPI.transfer() returns only after the byte has been clocked in, so the
+  // bus is idle here and letting go of the pins cannot cut a bit short.
+  if (_spiSck != -1) {
+    gpio_set_function(_spiSck, GPIO_FUNC_NULL);
+    gpio_set_function(_spiMosi, GPIO_FUNC_NULL);
+  }
+#endif
+  if (_csPin != -1) digitalWrite(_csPin, HIGH);
+  SPI.endTransaction();
+}
 
 bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
   return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
@@ -63,6 +136,7 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
     #else
       SPI.begin(); 
     #endif
+    _spiDetectPins();
 
   } else {
     #if defined(ESP32) 
@@ -111,12 +185,10 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
 
 void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    _spiSelect();
     SPI.transfer(startReg | 0x80); 
     for(size_t i=0; i<len; i++) buffer[i] = SPI.transfer(0x00);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    _spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(startReg);
@@ -128,12 +200,10 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
 
 void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    _spiSelect();
     SPI.transfer(reg & 0x7F); 
     SPI.transfer(data);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    _spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(reg); 
@@ -145,12 +215,10 @@ void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
 uint8_t ICM42688P::readRegister(uint8_t reg) {
   uint8_t data = 0;
   if (_bus == BUS_SPI) {
-    SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    if (_csPin != -1) digitalWrite(_csPin, LOW);
+    _spiSelect();
     SPI.transfer(reg | 0x80); 
     data = SPI.transfer(0x00);
-    if (_csPin != -1) digitalWrite(_csPin, HIGH);
-    SPI.endTransaction();
+    _spiDeselect();
   } else {
     _wire->beginTransmission(_i2cAddr);
     _wire->write(reg); 

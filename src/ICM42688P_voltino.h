@@ -134,6 +134,32 @@ public:
   
   void setDebug(bool enable);
 
+  // --- SPI pin release (RP2040 / RP2350) ---
+  // On the TriSense module the IMU's SCK and MOSI pass through an
+  // SN74LVC2T45 whose direction is set by CS. While CS is HIGH (IMU not
+  // selected) that buffer DRIVES the SCK and MOSI pins of the connector
+  // with the I2C bus levels - and the MCU drives the same wires as SPI
+  // outputs, so the two push-pull drivers fight. That is a short circuit
+  // of roughly 15-25 mA per line for as long as the IMU is not being
+  // read, which is nearly all the time.
+  //
+  // With release enabled the driver hands SCK and MOSI to the SPI block
+  // only for the duration of a transfer, after CS has gone LOW, and turns
+  // them back into high-impedance inputs before CS goes HIGH again. MISO is
+  // untouched (the module already releases it).
+  //
+  // It is ON by default on RP2040/RP2350 in BUS_SPI mode; the pins are
+  // detected from the SPI block's pin mux after SPI.begin(), so calling
+  // SPI.setSCK()/setTX() before begin() is enough. It does nothing on other
+  // platforms.
+  //
+  // The consequence is that NO OTHER DEVICE CAN SHARE THIS SPI BUS: between
+  // IMU transfers SCK and MOSI are not driven by the MCU. They could not be
+  // shared anyway - the module drives them itself while deselected.
+  // Call setSPIPinRelease(false) BEFORE begin() to keep the old behaviour.
+  void setSPIPinRelease(bool enable);
+  bool getSPIPinRelease() const { return _spiRelease; }
+
   // Selects the I2C bus for BUS_I2C mode. Must be called BEFORE begin().
   // Ignored in BUS_SPI mode. The whole TriSense module shares one bus, so
   // TriSense::beginAll() sets this for you.
@@ -269,6 +295,12 @@ private:
   TwoWire* _wire = &Wire;
   ICM_BUS _bus;
   int8_t _csPin;
+  bool   _spiRelease = true;
+  int8_t _spiSck = -1;          // detected at begin(); -1 = release inactive
+  int8_t _spiMosi = -1;
+  void _spiSelect();
+  void _spiDeselect();
+  void _spiDetectPins();
   uint8_t _i2cAddr;
   uint32_t _spiFreq;
   // _requestedOdr is what the sketch asked for; _odr is what the bus can

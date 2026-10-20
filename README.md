@@ -34,6 +34,15 @@ To maximize performance, the library supports a **Hybrid Mode**:
 
 Platform-specific pin configuration is supported for **ESP32**, **RP2040**, and **RP2350** architectures.
 
+> **The IMU's SPI bus cannot be shared.** On the TriSense module, SCK and MOSI pass through a
+> level shifter whose direction follows CS: while the IMU is *not* selected, the module drives
+> those two pins itself. Any other SPI device on the same wires will be corrupted, and an MCU
+> that keeps SCK/MOSI as outputs between transfers fights the module in a short circuit of
+> roughly 15–25 mA per line. On **RP2040/RP2350** the driver therefore releases SCK and MOSI
+> (high-impedance) between IMU transfers and only drives them while CS is LOW — automatic,
+> no code change needed. Give other SPI devices their own SPI block (`SPI1`).
+> `imu.setSPIPinRelease(false)` before `beginAll()` restores the old behaviour.
+
 ### 🧠 Dual Sensor Fusion Engines
 
 | Feature | `SimpleTriFusion` | `AdvancedTriFusion` |
@@ -561,6 +570,7 @@ The usual cause is a blocking `Serial.print` at a low baud rate. If you see over
 | `begin(busType, csPin, freq, i2cAddr, sck, miso, mosi)` | Full initialization with pin mapping |
 | `beginI2C(freq, addr, sda, scl)` | I2C-specific init |
 | `beginSPI(csPin, freq, sck, miso, mosi)` | SPI-specific init |
+| `setSPIPinRelease(enable)` | RP2040/RP2350: release SCK/MOSI between transfers (default on; call before `begin`) |
 | `setODR(odr)` | Set output data rate |
 | `setAccelFS(fs)` | Set accelerometer full-scale range |
 | `setGyroFS(fs)` | Set gyroscope full-scale range |

@@ -136,6 +136,8 @@ setODR	KEYWORD2
 setOversampling	KEYWORD2
 setPowerMode	KEYWORD2
 setWire	KEYWORD2
+setSPIPinRelease	KEYWORD2
+getSPIPinRelease	KEYWORD2
 setYawKi	KEYWORD2
 softReset	KEYWORD2
 stepDownODR	KEYWORD2

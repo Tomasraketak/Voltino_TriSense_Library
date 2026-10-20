@@ -69,6 +69,41 @@ sensor.beginAll(MODE_HYBRID, csPin, spiHz);       // IMU on SPI, mag+baro on I2C
 `MODE_I2C` needs four wires; `MODE_HYBRID` needs seven. There is no mode that
 puts the magnetometer or barometer on SPI, because those parts do not have it.
 
+### The SPI bus is the IMU's alone
+
+The IMU runs at 1.8 V, so the module translates its SPI lines. SCK and MOSI go
+through an SN74LVC2T45 whose direction pin is driven by CS:
+
+| CS | SCK / MOSI on the connector |
+|---|---|
+| LOW (IMU selected) | inputs — the MCU drives them, as normal SPI |
+| HIGH (not selected) | **outputs** — the module drives them with the I2C bus levels |
+
+This is what lets the same IMU pins serve I2C mode, but it has two consequences:
+
+1. **No other device can share these SPI wires.** Whenever it is being talked
+   to, the TriSense CS is HIGH and the module is driving SCK and MOSI.
+   Put any other SPI device on a separate SPI block.
+2. **An MCU that drives SCK and MOSI between transfers is in a short circuit
+   with the module.** Most SPI drivers leave those pins as push-pull outputs
+   the whole time, and with SPI mode 0 SCK idles LOW while the I2C clock idles
+   HIGH — so the two drivers fight almost continuously, at roughly 15–25 mA
+   per line. It does not stop the IMU working, which is why it is easy to miss;
+   it wastes power, injects switching noise next to the barometer, and stresses
+   the MCU's pins.
+
+On **RP2040 / RP2350** the driver removes the second problem itself: after
+`SPI.begin()` it finds the SCK and TX pins in the pin mux and keeps them
+high-impedance except during a transfer, switching them on only after CS has
+gone LOW and off again before CS goes HIGH. MISO is untouched — the module
+already releases it. Nothing to configure; `setSPIPinRelease(false)` before
+`begin()` turns it off. On other platforms, add a series resistor of
+330–470 Ω in SCK and MOSI to limit the current (fine at 10 MHz).
+
+To check it on a board: with the sketch running, measure SCK to GND with a
+multimeter. 0 V or 3.3 V means nobody is fighting; a value in between
+(typically 1–2 V) means two drivers are.
+
 ### Choosing the I2C bus
 
 Every I2C device on the module shares one bus, so it is selected once:
@@ -498,6 +533,10 @@ Check in this order:
    boards have them; a bare module may not.
 4. **The right mode.** `MODE_HYBRID` with a wrong CS pin fails silently in a way
    that looks like a dead sensor.
+5. **Nothing else on the SPI wires.** The module drives SCK and MOSI whenever
+   the IMU is not selected (see [§2](#the-spi-bus-is-the-imus-alone)), so a
+   second SPI device on the same bus breaks both. WHO_AM_I reading `0x00` with
+   correct wiring is the typical symptom.
 
 ### `!! FIFO OVERFLOW`
 
