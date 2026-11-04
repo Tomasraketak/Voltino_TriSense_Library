@@ -167,11 +167,11 @@ jobs:
       # Checks library.properties, the folder layout and the rest of the Arduino
       # library specification.
       #
-      # library-manager: submit checks readiness for submission to the Arduino
+      # library-manager: update checks readiness for submission to the Arduino
       # Library Manager index (name uniqueness, URL, header named after the
       # library, ...). Once the library is indexed, switch to `update` so
       # releases are checked against the index metadata.
       - uses: arduino/arduino-lint-action@v1
         with:
-          library-manager: submit
+          library-manager: update
           compliance: strict
