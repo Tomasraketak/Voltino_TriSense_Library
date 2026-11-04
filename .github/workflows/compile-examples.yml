@@ -167,10 +167,9 @@ jobs:
       # Checks library.properties, the folder layout and the rest of the Arduino
       # library specification.
       #
-      # library-manager: update checks readiness for submission to the Arduino
-      # Library Manager index (name uniqueness, URL, header named after the
-      # library, ...). Once the library is indexed, switch to `update` so
-      # releases are checked against the index metadata.
+      # library-manager: update checks releases of a library that is already in
+      # the Arduino Library Manager index (Voltino_TriSense is indexed, so the
+      # `submit` mode would fail on its own name being taken, rule LP017).
       - uses: arduino/arduino-lint-action@v1
         with:
           library-manager: update
