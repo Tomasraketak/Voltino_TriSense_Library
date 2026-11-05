@@ -1,5 +1,7 @@
 # Voltino TriSense Library
 
+> 🛒 **Get the module:** the [Voltino TriSense Pro](https://www.voltinolabs.cz/produkty/voltino-trisense-pro?utm_source=github&utm_medium=readme&utm_campaign=trisense-library) board (ICM-42688-P + AK09918C + BMP580) is available at [voltinolabs.cz](https://www.voltinolabs.cz/produkty/voltino-trisense-pro?utm_source=github&utm_medium=readme&utm_campaign=trisense-library). Flight-proven in our own rockets and CanSats, shipped from the Czech Republic.
+
 ## Overview
 
 **Voltino TriSense** is a high-performance Arduino library designed specifically for the **Voltino TriSense Pro** sensor board. It provides a unified interface for initializing and reading data from state-of-the-art environmental and motion sensors.
