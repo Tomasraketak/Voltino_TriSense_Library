@@ -226,8 +226,15 @@ struct Bmp {
     }
     return r[reg & 0x7F];
   }
-  void write(uint8_t reg, uint8_t v) { r[reg & 0x7F] = v; }
+  uint32_t ignored = 0;   // writes the real part would not accept
+  void write(uint8_t reg, uint8_t v) {
+    // DSP_IIR is writable only in STANDBY (ODR_CONFIG mode bits 00).
+    if (reg == 0x31 && (r[0x37] & 0x03) != 0) { ignored++; return; }
+    r[reg & 0x7F] = v;
+  }
 } g_bmp;
+uint8_t  sim_bmp_reg(uint8_t reg) { return g_bmp.r[reg & 0x7F]; }
+uint32_t sim_bmp_ignored(void)    { return g_bmp.ignored; }
 
 void sim_reset(int motion, uint32_t seed) {
   g_us = 1000000; g_motion = motion; g_rng = seed;

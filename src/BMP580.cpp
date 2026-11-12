@@ -50,7 +50,8 @@ void BMP580::setOversampling(BMP580_OSR osr_p, BMP580_OSR osr_t) {
 }
 
 void BMP580::setODR(BMP580_ODR odr) {
-  uint8_t odrConfig = (readRegister(BMP580_ODR_CONFIG) & 0x03) | ((odr & 0x3F) << 2);  
+  // Keep the power mode and deep_dis (bit 7), replace only the ODR field.
+  uint8_t odrConfig = (readRegister(BMP580_ODR_CONFIG) & (0x03 | BMP580_BIT_DEEP_DIS)) | ((odr & 0x1F) << 2);
   writeRegister(BMP580_ODR_CONFIG, odrConfig);
   
   // Dynamically update the timeout whenever ODR changes
@@ -97,11 +98,22 @@ void BMP580::wake() {
 }
 
 void BMP580::setIIRFilter(BMP580_IIR iir_p, BMP580_IIR iir_t) {
-  // We use read-modify-write to safely preserve other config bits (like shnd_ext) in DSP_CONFIG
-  uint8_t dspConfig = readRegister(BMP580_DSP_CONFIG);
-  dspConfig &= 0xC0; // Clear bits 0-5 (iir_p and iir_t)
-  dspConfig |= (iir_p << 3) | iir_t;
-  writeRegister(BMP580_DSP_CONFIG, dspConfig);
+  // DSP_IIR (0x31) is writable only in STANDBY, and a non-bypass IIR needs
+  // deep standby disabled. So: STANDBY with deep_dis set, write, then the
+  // previous power mode back (same procedure as Bosch's bmp5_set_iir_config).
+  const uint8_t odrConfig = readRegister(BMP580_ODR_CONFIG);
+  const bool filtered = (iir_p != BMP580_IIR_OFF) || (iir_t != BMP580_IIR_OFF);
+  const uint8_t deep = filtered ? BMP580_BIT_DEEP_DIS : (odrConfig & BMP580_BIT_DEEP_DIS);
+  const uint8_t standby = (uint8_t)((odrConfig & 0x7C) | deep);   // mode bits 00 = STANDBY
+  writeRegister(BMP580_ODR_CONFIG, standby);
+  if ((odrConfig & 0x03) != BMP580_MODE_STANDBY) delay(3);       // let a running conversion end
+
+  uint8_t iir = readRegister(BMP580_DSP_IIR);
+  iir &= 0xC0;                       // keep the reserved bits 7:6
+  iir |= (uint8_t)((iir_p & 0x07) << 3) | (uint8_t)(iir_t & 0x07);
+  writeRegister(BMP580_DSP_IIR, iir);
+
+  writeRegister(BMP580_ODR_CONFIG, (uint8_t)(standby | (odrConfig & 0x03)));
 }
 
 // ----------------------

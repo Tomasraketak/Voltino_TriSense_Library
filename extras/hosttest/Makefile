@@ -10,6 +10,8 @@
 #                   builds that are allowed to differ (feature switches)
 #   make overflow && ./overflow
 #                   FIFO overflow / lost-packet detection
+#   make baro && ./baro
+#                   BMP580 configuration lands in the right registers
 #
 # Extra flags: make CXXFLAGS_EXTRA=-DTRISENSE_LITE=1, -D__ARM_FP=1 (the
 # hardware-FPU invSqrt path), ...
@@ -29,6 +31,9 @@ accuracy: accuracy.cpp sim.cpp stub/*.h $(addprefix $(SRC)/,$(LIBSRC))
 overflow: overflow.cpp sim.cpp stub/*.h $(addprefix $(SRC)/,$(LIBSRC))
 	$(CXX) $(CXXFLAGS) -Istub -I$(SRC) -o $@ overflow.cpp sim.cpp $(addprefix $(SRC)/,$(LIBSRC)) -lm
 
+baro: baro.cpp sim.cpp stub/*.h $(addprefix $(SRC)/,$(LIBSRC))
+	$(CXX) $(CXXFLAGS) -Istub -I$(SRC) -o $@ baro.cpp sim.cpp $(addprefix $(SRC)/,$(LIBSRC)) -lm
+
 trace.txt: trace
 	./trace > $@
 
@@ -42,5 +47,5 @@ compare: trace.txt
 	cmp trace.ref.txt trace.txt && echo "IDENTICAL to $(REF)"
 
 clean:
-	rm -rf trace accuracy overflow trace.ref trace.txt trace.ref.txt .ref
+	rm -rf trace accuracy overflow baro trace.ref trace.txt trace.ref.txt .ref
 .PHONY: all compare clean
