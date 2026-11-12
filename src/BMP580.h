@@ -23,6 +23,7 @@
 
 // Registers (from datasheet BST-BMP580-DS004-02)
 #define BMP580_CHIP_ID 0x01
+#define BMP580_DSP_CONFIG 0x30  // IIR routing: bit 3/5 filtered T/P to the data registers, 4/6 to the FIFO
 #define BMP580_DSP_IIR 0x31     // IIR filter coefficients (set_iir_t 2:0, set_iir_p 5:3)
 // ODR_CONFIG bit 7: deep_dis. A non-bypass IIR needs deep standby disabled,
 // otherwise the power mode becomes invalid (Bosch BMP5 SensorAPI).

@@ -229,7 +229,7 @@ struct Bmp {
   uint32_t ignored = 0;   // writes the real part would not accept
   void write(uint8_t reg, uint8_t v) {
     // DSP_IIR is writable only in STANDBY (ODR_CONFIG mode bits 00).
-    if (reg == 0x31 && (r[0x37] & 0x03) != 0) { ignored++; return; }
+    if ((reg == 0x30 || reg == 0x31) && (r[0x37] & 0x03) != 0) { ignored++; return; }
     r[reg & 0x7F] = v;
   }
 } g_bmp;

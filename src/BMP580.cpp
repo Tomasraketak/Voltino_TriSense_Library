@@ -113,6 +113,15 @@ void BMP580::setIIRFilter(BMP580_IIR iir_p, BMP580_IIR iir_t) {
   iir |= (uint8_t)((iir_p & 0x07) << 3) | (uint8_t)(iir_t & 0x07);
   writeRegister(BMP580_DSP_IIR, iir);
 
+  // DSP_CONFIG: route the FILTERED values to the data registers (and FIFO).
+  // At reset the data registers show the unfiltered values. Same as the
+  // standalone BMP580 library.
+  uint8_t dsp = readRegister(BMP580_DSP_CONFIG);
+  dsp &= (uint8_t)~0x78;                                     // shdw/fifo_sel_iir_t, _p
+  if (iir_t != BMP580_IIR_OFF) dsp |= 0x08 | 0x10;
+  if (iir_p != BMP580_IIR_OFF) dsp |= 0x20 | 0x40;
+  writeRegister(BMP580_DSP_CONFIG, dsp);
+
   writeRegister(BMP580_ODR_CONFIG, (uint8_t)(standby | (odrConfig & 0x03)));
 }
 

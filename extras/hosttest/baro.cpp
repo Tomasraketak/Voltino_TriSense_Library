@@ -1,5 +1,5 @@
 // BMP580 configuration against the simulated part, which, like the real one,
-// ignores a DSP_IIR write outside STANDBY.
+// ignores a DSP_IIR / DSP_CONFIG write outside STANDBY.
 //
 //   make baro && ./baro
 //
@@ -33,7 +33,8 @@ int main() {
          iir, oor, odr, (unsigned)sim_bmp_ignored());
   check(iir == 0x10, "IIR_3 on pressure, off on temperature, in DSP_IIR");
   check(oor == 0x00, "OOR_CONFIG untouched");
-  check(sim_bmp_ignored() == 0, "every DSP_IIR write made in STANDBY");
+  check((sim_bmp_reg(0x30) & 0x78) == 0x60, "filtered pressure routed to data registers and FIFO");
+  check(sim_bmp_ignored() == 0, "every DSP_IIR / DSP_CONFIG write made in STANDBY");
   check((odr & 0x03) == BMP580_MODE_NORMAL, "back in NORMAL mode");
   check((odr & 0x80) != 0, "deep standby disabled for the IIR");
   check(((odr >> 2) & 0x1F) == BMP580_ODR_240Hz, "ODR kept");
