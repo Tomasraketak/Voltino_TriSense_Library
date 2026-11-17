@@ -400,9 +400,11 @@ public:
   // setting is chosen again for the new ODR. The getters return the nominal
   // bandwidth (Hz) of the setting in effect, for the ODR in effect; the actual
   // -3 dB point also depends on the filter order. The low-latency settings
-  // 14/15 are not used. UI filter registers are in bank 0 and may change
-  // while the sensors run; nothing is power-cycled. Returns false if the
-  // read-back does not match.
+  // 14/15 are not used. Section 12.9 allows only ODR, FSR and mode to change
+  // while the sensors run, so a write here power-cycles them exactly like the
+  // AAF setters (~80 ms, FIFO flushed) - also when an ODR change re-selects a
+  // DIFFERENT UI setting; one that keeps the setting writes nothing. Returns
+  // false if the read-back does not match.
   bool setUIFilter(float gyroHz, float accelHz);
   bool setUIFilterOrder(ICM_UI_FILT_ORDER gyroOrder, ICM_UI_FILT_ORDER accelOrder);
   float getGyroUIFilterHz();
@@ -578,6 +580,8 @@ private:
   bool _fifoTsValid = false;
 
   void resetFilterState();
+  bool sensorsOffForConfig();                  // Section 12.9 bracket; true if they were running
+  void sensorsOnAfterConfig(bool wasRunning);
   bool writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt);
   bool applyUIFilterBandwidth();
   float uiFilterHz(uint8_t bw);

@@ -47,6 +47,16 @@ static void checkBankDiscipline(bool expectOff) {
   CHECK(stub_bank() == 0, "chip left in bank %u", stub_bank());
 }
 
+// Section 12.9: GYRO_CONFIG1 / GYRO_ACCEL_CONFIG0 / ACCEL_CONFIG1 are written
+// with gyro + accel off (PWR_MGMT0 = 0), like every non-ODR/FSR/mode register.
+static void checkUIWritesWithSensorsOff() {
+  for (size_t i = 0; i < stub_log_size(); i++) {
+    const StubAccess &a = stub_log(i);
+    if (a.write && a.bank == 0 && a.reg >= 0x51 && a.reg <= 0x53)
+      CHECK(a.pwr == 0x00, "reg 0x%02X written with PWR_MGMT0 = 0x%02X", a.reg, a.pwr);
+  }
+}
+
 static bool beginImu(ICM42688P &imu) {
   stub_reset();
   imu.setSpiPinRelease(-1, -1);
@@ -186,6 +196,7 @@ static void testUIFilter() {
   CHECK(imu.getAccelUIFilterHz() == 250.0f, "accel UI %.1f", imu.getAccelUIFilterHz());
   for (size_t i = 0; i < stub_log_size(); i++)   // Bank 0 registers only: no bank switch at all
     CHECK(stub_log(i).bank == 0 && stub_log(i).reg != 0x76, "UI filter left bank 0");
+  checkUIWritesWithSensorsOff();
 
   CHECK(imu.setUIFilter(70, 0), "setUIFilter gyro only");   // 62.5 is nearest; accel stays
   CHECK(lastWrite(0, 0x52) == 0x15, "GYRO_ACCEL_CONFIG0 = 0x%02X, expected 0x15", lastWrite(0, 0x52));
@@ -206,6 +217,20 @@ static void testUIFilter() {
   CHECK(imu.getGyroUIFilterOrder() == UI_FILT_3RD_ORDER && imu.getAccelUIFilterOrder() == UI_FILT_1ST_ORDER,
         "order getters");
   CHECK(!imu.setUIFilterOrder((ICM_UI_FILT_ORDER)3, UI_FILT_1ST_ORDER), "reserved order rejected");
+  checkUIWritesWithSensorsOff();
+  CHECK(stub_reg(0, 0x4E) == 0x0F, "sensors left off after UI filter writes");
+
+  // 200 Hz -> 100 Hz ODR: gyro keeps setting 2 (80 Hz), but accel moves from
+  // setting 0 (now ODR/2 = 50 Hz) to setting 1 (100 Hz) -> one power cycle.
+  // Setting the same ODR again keeps both settings -> no power cycle.
+  stub_log_clear();
+  imu.setODR(ODR_100HZ);
+  CHECK(lastWrite(0, 0x52) == 0x12, "100 Hz ODR: GYRO_ACCEL_CONFIG0 = 0x%02X, expected 0x12", lastWrite(0, 0x52));
+  imu.setODR(ODR_100HZ);
+  size_t pwrWrites = 0;
+  for (size_t i = 0; i < stub_log_size(); i++)
+    if (stub_log(i).write && stub_log(i).reg == 0x4E) pwrWrites++;
+  CHECK(pwrWrites == 2, "repeating the same ODR power-cycled again (%u PWR_MGMT0 writes)", (unsigned)pwrWrites);
 
   // Without setUIFilter() the ODR path does not touch GYRO_ACCEL_CONFIG0.
   ICM42688P fresh;

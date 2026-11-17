@@ -1119,15 +1119,33 @@ void ICM42688P::resetFilterState() {
   _fifoTsValid = false;
 }
 
-bool ICM42688P::writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt) {
-  // Section 12.9: change the static (bank 1/2) filter registers with the gyro
-  // and accel off. Respect the gyro's 45 ms minimum on-time first.
+// DS-000347 section 12.9: while the sensors run, only ODR, FSR and sensor mode
+// may be changed. Every other register - the AAF coefficients and the UI filter
+// alike - is to be written as: accel + gyro off, modify, back on. These two
+// bracket such a write. The gyro's 45 ms minimum on-time is respected first;
+// afterwards the 200 us write hold-off and the 30 ms gyro start-up are waited
+// out and the FIFO is flushed of start-up samples. Asleep, nothing is touched.
+bool ICM42688P::sensorsOffForConfig() {
   const bool running = !_sleeping && _pwrMgmt0 != ICM42688_PWR_SENSORS_OFF;
   if (running) {
     const uint32_t onFor = millis() - _powerOnMs;
     if (onFor < ICM42688_GYRO_MIN_ON_MS) delay(ICM42688_GYRO_MIN_ON_MS - onFor);
     writeRegister(ICM42688_REG_PWR_MGMT0, ICM42688_PWR_SENSORS_OFF);
   }
+  return running;
+}
+
+void ICM42688P::sensorsOnAfterConfig(bool wasRunning) {
+  if (!wasRunning) return;
+  writeRegister(ICM42688_REG_PWR_MGMT0, _pwrMgmt0);
+  _powerOnMs = millis();
+  delayMicroseconds(ICM42688_PWR_WRITE_HOLDOFF_US + 100);  // No writes for 200 us
+  delay(ICM42688_GYRO_STARTUP_MS);
+  flushFIFO();   // Samples from the start-up transient are not data
+}
+
+bool ICM42688P::writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt) {
+  const bool running = sensorsOffForConfig();
 
   bool ok = true;
 
@@ -1179,13 +1197,7 @@ bool ICM42688P::writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel
 
   setBank(0);   // Always - every other access in this driver assumes bank 0
 
-  if (running) {
-    writeRegister(ICM42688_REG_PWR_MGMT0, _pwrMgmt0);
-    _powerOnMs = millis();
-    delayMicroseconds(ICM42688_PWR_WRITE_HOLDOFF_US + 100);  // No writes for 200 us
-    delay(ICM42688_GYRO_STARTUP_MS);
-    flushFIFO();   // Samples from the start-up transient are not data
-  }
+  sensorsOnAfterConfig(running);
   return ok;
 }
 
@@ -1240,8 +1252,13 @@ uint8_t ICM42688P::uiFilterBwFor(float hz) {
 bool ICM42688P::applyUIFilterBandwidth() {
   uint8_t gBw = (_uiGyroReqHz > 0) ? uiFilterBwFor(_uiGyroReqHz) : _uiGyroBw;
   uint8_t aBw = (_uiAccelReqHz > 0) ? uiFilterBwFor(_uiAccelReqHz) : _uiAccelBw;
+  // Already in effect (e.g. an ODR change that keeps the same setting): no
+  // write, so no power cycle.
+  if (gBw == _uiGyroBw && aBw == _uiAccelBw) return true;
+  const bool running = sensorsOffForConfig();   // Section 12.9
   writeRegister(ICM42688_REG_GYRO_ACCEL_CONFIG0, (uint8_t)((aBw << 4) | (gBw & 0x0F)));
   const uint8_t rb = readRegister(ICM42688_REG_GYRO_ACCEL_CONFIG0);
+  sensorsOnAfterConfig(running);
   _uiGyroBw = rb & 0x0F;
   _uiAccelBw = rb >> 4;
   return _uiGyroBw == gBw && _uiAccelBw == aBw;
@@ -1256,6 +1273,7 @@ bool ICM42688P::setUIFilter(float gyroHz, float accelHz) {
 
 bool ICM42688P::setUIFilterOrder(ICM_UI_FILT_ORDER gyroOrder, ICM_UI_FILT_ORDER accelOrder) {
   if ((uint8_t)gyroOrder > UI_FILT_3RD_ORDER || (uint8_t)accelOrder > UI_FILT_3RD_ORDER) return false;
+  const bool running = sensorsOffForConfig();   // Section 12.9
   uint8_t g = readRegister(ICM42688_REG_GYRO_CONFIG1);
   g = (uint8_t)((g & ~(0x03 << ICM42688_SHIFT_GYRO_UI_FILT_ORD)) | (gyroOrder << ICM42688_SHIFT_GYRO_UI_FILT_ORD));
   writeRegister(ICM42688_REG_GYRO_CONFIG1, g);
@@ -1265,6 +1283,7 @@ bool ICM42688P::setUIFilterOrder(ICM_UI_FILT_ORDER gyroOrder, ICM_UI_FILT_ORDER 
 
   _uiGyroOrd = (readRegister(ICM42688_REG_GYRO_CONFIG1) >> ICM42688_SHIFT_GYRO_UI_FILT_ORD) & 0x03;
   _uiAccelOrd = (readRegister(ICM42688_REG_ACCEL_CONFIG1) >> ICM42688_SHIFT_ACCEL_UI_FILT_ORD) & 0x03;
+  sensorsOnAfterConfig(running);
   return _uiGyroOrd == (uint8_t)gyroOrder && _uiAccelOrd == (uint8_t)accelOrder;
 }
 

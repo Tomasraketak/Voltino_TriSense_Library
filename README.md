@@ -609,7 +609,7 @@ Serial.println(sensor.imu.getGyroUIFilterHz());                    // 100.0 at 1
 | `getGyroUIFilterHz()` / `getAccelUIFilterHz()` | Nominal bandwidth (Hz) of the setting in effect at the ODR in effect. The exact −3 dB point also depends on the filter order |
 | `getGyroUIFilterOrder()` / `getAccelUIFilterOrder()` | Order in effect |
 
-The UI filter registers are in bank 0 and may change while the sensors run, so these calls do not power-cycle anything. Each write is read back and the setter returns `false` on a mismatch. The low-latency settings 14 and 15 are not used by the driver. Without a `setUIFilter()` call the driver never writes `GYRO_ACCEL_CONFIG0`, so existing sketches behave exactly as before.
+Section 12.9 of the datasheet allows only ODR, full-scale range and sensor mode to change while the sensors run, so the UI filter registers (bank 0) get the same off → write → on treatment as the AAF: **~80 ms and a FIFO flush per call**. That includes an ODR change that makes a remembered `setUIFilter()` request land on a *different* setting; an ODR change that keeps the setting writes nothing. Each write is read back and the setter returns `false` on a mismatch. The low-latency settings 14 and 15 are not used by the driver. Without a `setUIFilter()` call the driver never writes `GYRO_ACCEL_CONFIG0`, so existing sketches behave exactly as before.
 
 ### Host tests
 
