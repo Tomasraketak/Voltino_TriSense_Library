@@ -188,6 +188,7 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   
   delay(10);
   if (!resetDevice()) return false;
+  resetFilterState();   // The soft reset put the filters back to power-on values
 
   _pwrMgmt0 = ICM42688_PWR_SENSORS_LN;
   _sleeping = false;
@@ -748,6 +749,11 @@ void ICM42688P::enforceBandwidthLimit() {
   uint8_t aConf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0xF0;
   writeRegister(ICM42688_REG_GYRO_CONFIG0, gConf | odd);
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, aConf | odd);
+
+  // The UI filter bandwidth is a fraction of the ODR, so a requested bandwidth
+  // has to be re-resolved whenever the ODR changes. Only once setUIFilter() has
+  // been called - otherwise there is no bus traffic here at all.
+  if (_uiGyroReqHz > 0 || _uiAccelReqHz > 0) applyUIFilterBandwidth();
 }
 
 void ICM42688P::setODR(ICM_ODR odr) {
@@ -797,6 +803,7 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   _fifoMode = mode;
   _fifoPacketSize = (mode == FIFO_20BIT_HIRES) ? 20 : 16;
   invalidateFIFOBuffer(); // Packets already buffered use the old packet layout
+  _fifoTsValid = false;
 
   // [VOLTINO FIX] First reset FIFO to bypass with empty configuration
   writeRegister(ICM42688_REG_FIFO_CONFIG, 0x00);
@@ -963,6 +970,14 @@ uint8_t ICM42688P::fillFIFOBuffer() {
   if (overflow) {
     _fifoOverflowFlag = true;
     if (_fifoOverflowCount < 0xFFFFFFFFUL) _fifoOverflowCount++;
+  }
+
+  // The chip's lost-packet counter is read on every overflow, and ONCE more on
+  // the first refill after begin() / resetLostPacketCount() to take the
+  // baseline. Taking the baseline only at the first overflow - as before - meant
+  // the packets lost in that first overflow were never counted, and the first
+  // overflow is usually the one that matters (a stall right after start-up).
+  if (overflow || !_lostPacketPrimed) {
 
     // A full FIFO is not the same as lost data: a FIFO sitting full loses
     // nothing as long as the drain keeps pace, and one stalled loop loses
@@ -979,7 +994,7 @@ uint8_t ICM42688P::fillFIFOBuffer() {
     const uint16_t raw = ((uint16_t)lost[0] << 8) | (uint16_t)lost[1];
 
     if (!_lostPacketPrimed) {
-      _lostPacketPrimed = true;
+      _lostPacketPrimed = true;   // Baseline only: earlier losses are not ours to count
     } else if (raw >= _lostPacketLastRaw) {
       _lostPacketTotal += (uint32_t)(raw - _lostPacketLastRaw);
     } else {
@@ -1029,6 +1044,237 @@ float ICM42688P::getGyroOffsetZ() { return gyrOffset[2]; }
 
 void ICM42688P::resetHardwareOffsets() { setBank(0); }
 void ICM42688P::setBank(uint8_t bank) { writeRegister(ICM42688_REG_BANK_SEL, bank); }
+
+// ---------------------------------------------------------------------------
+// Anti-alias filter (AAF) and UI filter
+// ---------------------------------------------------------------------------
+
+// DS-000347 section 5.3, "anti-alias filter" table, row n = AAF_DELT n.
+// Same table for gyro (bank 1) and accel (bank 2). Rows checked against the
+// open-source PX4 and ArduPilot ICM-42688 drivers where they use them (126,
+// 213, 258, 348, 394, 536, 585 = power-on gyro, 997, 1163 = power-on accel).
+struct IcmAafRow { uint16_t hz; uint16_t deltSqr; uint8_t bitShift; };
+static const IcmAafRow kAafTable[ICM42688_AAF_DELT_MAX] ICM_TABLE_ATTR = {
+  {  42,    1, 15}, {  84,    4, 13}, { 126,    9, 12}, { 170,   16, 11},
+  { 213,   25, 10}, { 258,   36, 10}, { 303,   49,  9}, { 348,   64,  9},
+  { 394,   81,  9}, { 441,  100,  8}, { 488,  122,  8}, { 536,  144,  8},
+  { 585,  170,  8}, { 634,  196,  7}, { 684,  224,  7}, { 734,  256,  7},
+  { 785,  288,  7}, { 837,  324,  7}, { 890,  360,  6}, { 943,  400,  6},
+  { 997,  440,  6}, {1051,  488,  6}, {1107,  528,  6}, {1163,  576,  6},
+  {1220,  624,  6}, {1277,  680,  6}, {1336,  736,  5}, {1395,  784,  5},
+  {1454,  848,  5}, {1515,  896,  5}, {1577,  960,  5}, {1639, 1024,  5},
+  {1702, 1088,  5}, {1766, 1152,  5}, {1830, 1232,  5}, {1896, 1296,  5},
+  {1962, 1376,  4}, {2029, 1440,  4}, {2097, 1536,  4}, {2166, 1600,  4},
+  {2235, 1696,  4}, {2306, 1760,  4}, {2377, 1856,  4}, {2449, 1952,  4},
+  {2522, 2016,  4}, {2596, 2112,  4}, {2671, 2208,  4}, {2746, 2304,  4},
+  {2823, 2400,  4}, {2900, 2496,  4}, {2978, 2592,  4}, {3057, 2720,  4},
+  {3137, 2816,  3}, {3217, 2944,  3}, {3299, 3008,  3}, {3381, 3136,  3},
+  {3464, 3264,  3}, {3548, 3392,  3}, {3633, 3456,  3}, {3718, 3584,  3},
+  {3805, 3712,  3}, {3892, 3840,  3}, {3979, 3968,  3}
+};
+static inline uint16_t aafHz(uint8_t delt)       { return ICM_TABLE_WORD(&kAafTable[delt - 1].hz); }
+static inline uint16_t aafDeltSqr(uint8_t delt)  { return ICM_TABLE_WORD(&kAafTable[delt - 1].deltSqr); }
+static inline uint8_t  aafBitShift(uint8_t delt) { return ICM_TABLE_BYTE(&kAafTable[delt - 1].bitShift); }
+
+// The table row nearest to hz (ties -> the lower frequency); 0 for hz = 0.
+static uint8_t aafDeltFor(uint16_t hz) {
+  if (hz == 0) return 0;
+  uint8_t best = 1;
+  uint16_t bestDiff = 0xFFFF;
+  for (uint8_t d = 1; d <= ICM42688_AAF_DELT_MAX; d++) {
+    const uint16_t f = aafHz(d);
+    const uint16_t diff = (f > hz) ? (uint16_t)(f - hz) : (uint16_t)(hz - f);
+    if (diff < bestDiff) { bestDiff = diff; best = d; }   // Strict: a tie keeps the lower row
+  }
+  return best;
+}
+
+// Decodes the three coefficient registers back into a table row. A triple
+// that is not a table row (or DELT out of range) is reported as 0xFF, unknown.
+static uint8_t aafDecode(uint8_t delt, uint8_t sqrLow, uint8_t shiftSqrHigh) {
+  if (delt < 1 || delt > ICM42688_AAF_DELT_MAX) return 0xFF;
+  const uint16_t deltSqr = (uint16_t)(((shiftSqrHigh & 0x0F) << 8) | sqrLow);
+  const uint8_t bitShift = (uint8_t)(shiftSqrHigh >> 4);
+  if (deltSqr != aafDeltSqr(delt) || bitShift != aafBitShift(delt)) return 0xFF;
+  return delt;
+}
+
+uint16_t ICM42688P::antiAliasFilterLookup(uint16_t hz, uint8_t *delt, uint16_t *deltSqr, uint8_t *bitShift) {
+  const uint8_t d = aafDeltFor(hz);
+  if (delt) *delt = d;
+  if (deltSqr) *deltSqr = d ? aafDeltSqr(d) : 0;
+  if (bitShift) *bitShift = d ? aafBitShift(d) : 0;
+  return d ? aafHz(d) : 0;
+}
+
+void ICM42688P::resetFilterState() {
+  _aafGyroDelt = ICM42688_AAF_GYRO_RESET_DELT;
+  _aafAccelDelt = ICM42688_AAF_ACCEL_RESET_DELT;
+  _uiGyroBw = ICM42688_UI_FILT_BW_RESET;
+  _uiAccelBw = ICM42688_UI_FILT_BW_RESET;
+  _uiGyroOrd = UI_FILT_2ND_ORDER;
+  _uiAccelOrd = UI_FILT_2ND_ORDER;
+  _uiGyroReqHz = 0;
+  _uiAccelReqHz = 0;
+  _fifoTsValid = false;
+}
+
+bool ICM42688P::writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt) {
+  // Section 12.9: change the static (bank 1/2) filter registers with the gyro
+  // and accel off. Respect the gyro's 45 ms minimum on-time first.
+  const bool running = !_sleeping && _pwrMgmt0 != ICM42688_PWR_SENSORS_OFF;
+  if (running) {
+    const uint32_t onFor = millis() - _powerOnMs;
+    if (onFor < ICM42688_GYRO_MIN_ON_MS) delay(ICM42688_GYRO_MIN_ON_MS - onFor);
+    writeRegister(ICM42688_REG_PWR_MGMT0, ICM42688_PWR_SENSORS_OFF);
+  }
+
+  bool ok = true;
+
+  if (doGyro) {
+    setBank(1);
+    uint8_t s2 = readRegister(ICM42688_B1_GYRO_CONFIG_STATIC2);
+    if (gyroDelt == 0) {
+      s2 |= ICM42688_BIT_GYRO_AAF_DIS;       // Coefficients are left as they are
+    } else {
+      // Coefficients first, then enable, so the filter never runs on a half-written triple.
+      const uint16_t sq = aafDeltSqr(gyroDelt);
+      writeRegister(ICM42688_B1_GYRO_CONFIG_STATIC3, gyroDelt);
+      writeRegister(ICM42688_B1_GYRO_CONFIG_STATIC4, (uint8_t)(sq & 0xFF));
+      writeRegister(ICM42688_B1_GYRO_CONFIG_STATIC5,
+                    (uint8_t)((aafBitShift(gyroDelt) << 4) | ((sq >> 8) & 0x0F)));
+      s2 &= (uint8_t)~ICM42688_BIT_GYRO_AAF_DIS;   // GYRO_NF_DIS and reserved bits untouched
+    }
+    writeRegister(ICM42688_B1_GYRO_CONFIG_STATIC2, s2);
+
+    uint8_t rb[4];   // STATIC2..STATIC5, one burst
+    readRegisters(ICM42688_B1_GYRO_CONFIG_STATIC2, rb, 4);
+    _aafGyroDelt = (rb[0] & ICM42688_BIT_GYRO_AAF_DIS) ? 0 : aafDecode(rb[1] & 0x3F, rb[2], rb[3]);
+    if (_aafGyroDelt != gyroDelt) ok = false;
+  }
+
+  if (doAccel) {
+    setBank(2);
+    uint8_t s2 = readRegister(ICM42688_B2_ACCEL_CONFIG_STATIC2);
+    if (accelDelt == 0) {
+      s2 |= ICM42688_BIT_ACCEL_AAF_DIS;
+    } else {
+      const uint16_t sq = aafDeltSqr(accelDelt);
+      // DELT shares STATIC2 with AAF_DIS, so write it with the filter still in
+      // its old enable state, then the triple's other two parts, then enable.
+      s2 = (uint8_t)((s2 & 0x81) | (accelDelt << 1));
+      writeRegister(ICM42688_B2_ACCEL_CONFIG_STATIC2, s2);
+      writeRegister(ICM42688_B2_ACCEL_CONFIG_STATIC3, (uint8_t)(sq & 0xFF));
+      writeRegister(ICM42688_B2_ACCEL_CONFIG_STATIC4,
+                    (uint8_t)((aafBitShift(accelDelt) << 4) | ((sq >> 8) & 0x0F)));
+      s2 &= (uint8_t)~ICM42688_BIT_ACCEL_AAF_DIS;
+    }
+    writeRegister(ICM42688_B2_ACCEL_CONFIG_STATIC2, s2);
+
+    uint8_t rb[3];   // STATIC2..STATIC4
+    readRegisters(ICM42688_B2_ACCEL_CONFIG_STATIC2, rb, 3);
+    _aafAccelDelt = (rb[0] & ICM42688_BIT_ACCEL_AAF_DIS) ? 0 : aafDecode((rb[0] >> 1) & 0x3F, rb[1], rb[2]);
+    if (_aafAccelDelt != accelDelt) ok = false;
+  }
+
+  setBank(0);   // Always - every other access in this driver assumes bank 0
+
+  if (running) {
+    writeRegister(ICM42688_REG_PWR_MGMT0, _pwrMgmt0);
+    _powerOnMs = millis();
+    delayMicroseconds(ICM42688_PWR_WRITE_HOLDOFF_US + 100);  // No writes for 200 us
+    delay(ICM42688_GYRO_STARTUP_MS);
+    flushFIFO();   // Samples from the start-up transient are not data
+  }
+  return ok;
+}
+
+bool ICM42688P::setAntiAliasFilter(uint16_t gyroHz, uint16_t accelHz) {
+  return writeAntiAliasFilter(true, aafDeltFor(gyroHz), true, aafDeltFor(accelHz));
+}
+bool ICM42688P::setGyroAntiAliasFilter(uint16_t hz) {
+  return writeAntiAliasFilter(true, aafDeltFor(hz), false, 0);
+}
+bool ICM42688P::setAccelAntiAliasFilter(uint16_t hz) {
+  return writeAntiAliasFilter(false, 0, true, aafDeltFor(hz));
+}
+uint16_t ICM42688P::getGyroAntiAliasFilterHz() {
+  if (_aafGyroDelt == 0xFF) return 0xFFFF;
+  return _aafGyroDelt ? aafHz(_aafGyroDelt) : 0;
+}
+uint16_t ICM42688P::getAccelAntiAliasFilterHz() {
+  if (_aafAccelDelt == 0xFF) return 0xFFFF;
+  return _aafAccelDelt ? aafHz(_aafAccelDelt) : 0;
+}
+
+// Nominal UI filter bandwidth of setting bw at the ODR in effect (register
+// description of GYRO_ACCEL_CONFIG0, Low Noise mode). 0 for settings not used.
+float ICM42688P::uiFilterHz(uint8_t bw) {
+  const float odr = (_odr == ODR_12_5HZ) ? 12.5f : (float)_getHzFromODR(_odr);
+  const float base = (odr > 400.0f) ? odr : 400.0f;   // max(400 Hz, ODR)
+  switch (bw) {
+    case 0: return odr / 2.0f;
+    case 1: return base / 4.0f;
+    case 2: return base / 5.0f;
+    case 3: return base / 8.0f;
+    case 4: return base / 10.0f;
+    case 5: return base / 16.0f;
+    case 6: return base / 20.0f;
+    case 7: return base / 40.0f;
+    default: return 0.0f;
+  }
+}
+
+uint8_t ICM42688P::uiFilterBwFor(float hz) {
+  uint8_t best = 0;
+  float bestDiff = 1e30f, bestHz = 0;
+  for (uint8_t bw = 0; bw <= 7; bw++) {
+    const float f = uiFilterHz(bw);
+    const float diff = (f > hz) ? f - hz : hz - f;
+    // Nearest wins; on a tie the lower bandwidth (more filtering) wins.
+    if (diff < bestDiff || (diff == bestDiff && f < bestHz)) { bestDiff = diff; bestHz = f; best = bw; }
+  }
+  return best;
+}
+
+bool ICM42688P::applyUIFilterBandwidth() {
+  uint8_t gBw = (_uiGyroReqHz > 0) ? uiFilterBwFor(_uiGyroReqHz) : _uiGyroBw;
+  uint8_t aBw = (_uiAccelReqHz > 0) ? uiFilterBwFor(_uiAccelReqHz) : _uiAccelBw;
+  writeRegister(ICM42688_REG_GYRO_ACCEL_CONFIG0, (uint8_t)((aBw << 4) | (gBw & 0x0F)));
+  const uint8_t rb = readRegister(ICM42688_REG_GYRO_ACCEL_CONFIG0);
+  _uiGyroBw = rb & 0x0F;
+  _uiAccelBw = rb >> 4;
+  return _uiGyroBw == gBw && _uiAccelBw == aBw;
+}
+
+bool ICM42688P::setUIFilter(float gyroHz, float accelHz) {
+  // <= 0 leaves that sensor's UI filter as it is.
+  if (gyroHz > 0) _uiGyroReqHz = gyroHz;
+  if (accelHz > 0) _uiAccelReqHz = accelHz;
+  return applyUIFilterBandwidth();
+}
+
+bool ICM42688P::setUIFilterOrder(ICM_UI_FILT_ORDER gyroOrder, ICM_UI_FILT_ORDER accelOrder) {
+  if ((uint8_t)gyroOrder > UI_FILT_3RD_ORDER || (uint8_t)accelOrder > UI_FILT_3RD_ORDER) return false;
+  uint8_t g = readRegister(ICM42688_REG_GYRO_CONFIG1);
+  g = (uint8_t)((g & ~(0x03 << ICM42688_SHIFT_GYRO_UI_FILT_ORD)) | (gyroOrder << ICM42688_SHIFT_GYRO_UI_FILT_ORD));
+  writeRegister(ICM42688_REG_GYRO_CONFIG1, g);
+  uint8_t a = readRegister(ICM42688_REG_ACCEL_CONFIG1);
+  a = (uint8_t)((a & ~(0x03 << ICM42688_SHIFT_ACCEL_UI_FILT_ORD)) | (accelOrder << ICM42688_SHIFT_ACCEL_UI_FILT_ORD));
+  writeRegister(ICM42688_REG_ACCEL_CONFIG1, a);
+
+  _uiGyroOrd = (readRegister(ICM42688_REG_GYRO_CONFIG1) >> ICM42688_SHIFT_GYRO_UI_FILT_ORD) & 0x03;
+  _uiAccelOrd = (readRegister(ICM42688_REG_ACCEL_CONFIG1) >> ICM42688_SHIFT_ACCEL_UI_FILT_ORD) & 0x03;
+  return _uiGyroOrd == (uint8_t)gyroOrder && _uiAccelOrd == (uint8_t)accelOrder;
+}
+
+float ICM42688P::getGyroUIFilterHz() { return uiFilterHz(_uiGyroBw); }
+float ICM42688P::getAccelUIFilterHz() { return uiFilterHz(_uiAccelBw); }
+
+void ICM42688P::noteFIFOTimestamp(const uint8_t *packet, uint8_t tsOffset) {
+  _fifoTsValid = (packet[0] & ICM42688_FIFO_HEADER_TMST_MASK) == ICM42688_FIFO_HEADER_TMST_ODR;
+  _fifoTs = (uint16_t)((packet[tsOffset] << 8) | packet[tsOffset + 1]);
+}
 
 bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   switch (_fifoMode) {
@@ -1111,6 +1357,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   int16_t rawGx = (int16_t)((buffer[7] << 8) | buffer[8]);
   int16_t rawGy = (int16_t)((buffer[9] << 8) | buffer[10]);
   int16_t rawGz = (int16_t)((buffer[11] << 8) | buffer[12]);
+  noteFIFOTimestamp(buffer, 14);   // Packet 3: bytes 14-15
 
   const int32_t raw[6] = { rawAx, rawAy, rawAz, rawGx, rawGy, rawGz };
   scaleSample(raw, _accelScaleFactor, _gyroScaleFactor, ax, ay, az, gx, gy, gz);
@@ -1148,6 +1395,8 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   // V 20-bit módu je senzor natvrdo v rozsazích 16G a 2000DPS.
   // Maximum obou podepsaných (signed) 20-bit čísel je +/- 524288
+  noteFIFOTimestamp(buffer, 15);   // Packet 4: bytes 15-16
+
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 

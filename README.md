@@ -521,7 +521,18 @@ On every buffer refill the driver checks the FIFO count: a count within two pack
 
 The hardware `FIFO_FULL` bit in `INT_STATUS` is **not** used. On a real module (XIAO RP2350, HiRes, 8 kHz) it read as set on almost every refill while the FIFO held one or two packets and every sample arrived, so it reported overflows that never happened. The driver does not read `INT_STATUS` at all, and leaves `INT_SOURCE0` alone.
 
-When the flag is raised, the driver also reads the chip's own lost-packet counter (`FIFO_LOST_PKT`), which `getLostPacketCount()` accumulates.
+When the flag is raised, the driver also reads the chip's own lost-packet counter (`FIFO_LOST_PKT`), which `getLostPacketCount()` accumulates. The counter's baseline is taken on the first FIFO refill after `begin()` / `resetLostPacketCount()`, so packets lost in the **first** overflow are counted too (previously the baseline was taken at the first overflow, and that overflow's losses were silently dropped).
+
+**FIFO timestamps.** Every FIFO packet carries the chip's 16-bit ODR timestamp (1 µs per LSB at the power-on `TMST_CONFIG`, chip clock, wraps every 65.536 ms). After `readIMU()` returns a FIFO sample, `getFIFOTimestamp()` gives that packet's timestamp and `hasFIFOTimestamp()` says whether the packet header marked it as one (false in `FIFO_NONE`). The difference of two consecutive timestamps (`uint16_t` subtraction handles the wrap) is the true sample spacing — a gap of about twice the ODR period means a sample is missing, which an INS can use instead of assuming a fixed `dt`:
+
+```cpp
+static uint16_t lastTs; static bool haveTs = false;
+if (imu.readIMU(ax, ay, az, gx, gy, gz) && imu.hasFIFOTimestamp()) {
+  uint16_t ts = imu.getFIFOTimestamp();
+  if (haveTs) { uint16_t dtUs = ts - lastTs; /* 1000 at 1 kHz; ~2000 = one lost */ }
+  lastTs = ts; haveTs = true;
+}
+```
 
 **The library never prints anything** — poll it from your sketch:
 
@@ -533,6 +544,80 @@ if (sensor.imu.fifoOverflowed()) {                  // self-clearing since last 
 ```
 
 The usual cause is a blocking `Serial.print` at a low baud rate. If you see overflows, raise the baud rate (921600), log binary, or lower the ODR.
+
+---
+
+## Anti-alias and UI filters (ICM-42688-P)
+
+The IMU's signal path is *ADC → anti-alias filter (AAF) → decimator → UI filter → data registers / FIFO*. Both filters can be set from the driver.
+
+### Anti-alias filter
+
+The AAF decides how much vibration above the output Nyquist frequency folds back into the band your fusion integrates — on a rocket (motor buzz, fin flutter) it matters more than the ODR. Its 3 dB frequency is set by the coefficient triple `AAF_DELT` / `AAF_DELTSQR` / `AAF_BITSHIFT`, which must be taken together from the datasheet's AAF table (DS-000347, section 5.3: 63 steps from 42 Hz to 3979 Hz). The driver carries that table and picks the row **nearest** to the frequency you ask for (a tie goes to the lower frequency):
+
+```cpp
+sensor.imu.setODR(ODR_1KHZ);
+sensor.imu.setFIFOMode(FIFO_16BIT);
+// Gyro AAF ~250 Hz, accel ~200 Hz  ->  258 Hz and 213 Hz table rows
+if (!sensor.imu.setAntiAliasFilter(250, 200)) Serial.println("AAF write did not verify");
+Serial.println(sensor.imu.getGyroAntiAliasFilterHz());   // 258
+Serial.println(sensor.imu.getAccelAntiAliasFilterHz());  // 213
+```
+
+| Call | Effect |
+|------|--------|
+| `setAntiAliasFilter(gyroHz, accelHz)` | Both filters in one power cycle. `0` = disable that filter (`AAF_DIS`) |
+| `setGyroAntiAliasFilter(hz)` / `setAccelAntiAliasFilter(hz)` | One filter; the other is not touched |
+| `getGyroAntiAliasFilterHz()` / `getAccelAntiAliasFilterHz()` | 3 dB frequency the chip holds; `0` = disabled, `0xFFFF` = read-back did not match any table row |
+| `ICM42688P::antiAliasFilterLookup(hz, &delt, &deltSqr, &bitShift)` | The row a setter would pick, without touching the chip |
+
+A few rows: 42, 84, 126, 170, 213, 258, 303, 348, 394, 441, 488, **536**, **585 (gyro power-on)**, 634 … 997 … **1163 (accel power-on)** … 2029 … 3979 Hz. Requests below 42 Hz or above 3979 Hz are clamped to the end rows.
+
+How the write is done:
+
+- The coefficients live in **bank 1** (gyro, `GYRO_CONFIG_STATIC2..5`, 0x0B–0x0E) and **bank 2** (accel, `ACCEL_CONFIG_STATIC2..4`, 0x03–0x05). The driver switches with `REG_BANK_SEL` (0x76), touches nothing but those registers while it is away from bank 0, and **always** switches back to bank 0 — also when the write fails.
+- `GYRO_CONFIG_STATIC2` and `ACCEL_CONFIG_STATIC2` are read-modify-written, so the gyro notch filter bit (`GYRO_NF_DIS`) and the reserved bits keep their values. The coefficients are written before the filter is enabled.
+- The datasheet (section 12.9) asks for the gyro and accel to be **off** while these static registers change. If they are running, the call waits out the gyro's 45 ms minimum on-time, switches both off, writes, switches them back on, waits the 30 ms gyro start-up and flushes the FIFO. **Budget ~80 ms** — configure the filters in `setup()`, not in flight. While the IMU is in `sleep()` nothing is power-cycled.
+- Every register is read back; the setter returns `false` if the chip did not take the value, and the getters report what the chip really holds.
+- The setting survives `sleep()` / `wake()`. `begin()` performs a soft reset, which restores the power-on values (gyro 585 Hz, accel 1163 Hz) — call the setters after `begin()` / `beginAll()`.
+
+### UI filter
+
+The UI filter is the output low-pass after the decimator. Its bandwidth is a fraction of the ODR (Low Noise mode):
+
+| Setting | Bandwidth | at 1 kHz ODR | at 200 Hz ODR |
+|---|---|---|---|
+| 0 | ODR/2 | 500 Hz | 100 Hz |
+| 1 (power-on) | max(400 Hz, ODR)/4 | 250 Hz | 100 Hz |
+| 2 | max(400 Hz, ODR)/5 | 200 Hz | 80 Hz |
+| 3 | max(400 Hz, ODR)/8 | 125 Hz | 50 Hz |
+| 4 | max(400 Hz, ODR)/10 | 100 Hz | 40 Hz |
+| 5 | max(400 Hz, ODR)/16 | 62.5 Hz | 25 Hz |
+| 6 | max(400 Hz, ODR)/20 | 50 Hz | 20 Hz |
+| 7 | max(400 Hz, ODR)/40 | 25 Hz | 10 Hz |
+
+```cpp
+sensor.imu.setUIFilter(100, 50);                                   // nearest setting at the current ODR
+sensor.imu.setUIFilterOrder(UI_FILT_3RD_ORDER, UI_FILT_2ND_ORDER); // power-on: 2nd order for both
+Serial.println(sensor.imu.getGyroUIFilterHz());                    // 100.0 at 1 kHz
+```
+
+| Call | Effect |
+|------|--------|
+| `setUIFilter(gyroHz, accelHz)` | Nearest setting at the ODR in effect (tie → lower bandwidth). `<= 0` leaves that sensor's filter alone. The request is **remembered**: when the ODR changes (`setODR()`, the bus-bandwidth limiter, `stepDownODR()`) the nearest setting is chosen again for the new ODR |
+| `setUIFilterOrder(gyroOrder, accelOrder)` | `UI_FILT_1ST_ORDER` / `UI_FILT_2ND_ORDER` / `UI_FILT_3RD_ORDER` |
+| `getGyroUIFilterHz()` / `getAccelUIFilterHz()` | Nominal bandwidth (Hz) of the setting in effect at the ODR in effect. The exact −3 dB point also depends on the filter order |
+| `getGyroUIFilterOrder()` / `getAccelUIFilterOrder()` | Order in effect |
+
+The UI filter registers are in bank 0 and may change while the sensors run, so these calls do not power-cycle anything. Each write is read back and the setter returns `false` on a mismatch. The low-latency settings 14 and 15 are not used by the driver. Without a `setUIFilter()` call the driver never writes `GYRO_ACCEL_CONFIG0`, so existing sketches behave exactly as before.
+
+### Host tests
+
+`tests/host` runs the driver against a register-level model of the chip (five banks behind `REG_BANK_SEL`, access log) and checks the exact bytes written to bank 1 / bank 2 for exact table rows, nearest-row rounding, both table ends and the disable case; that the sensors are off during those writes; that nothing meant for bank 0 lands in another bank; that the chip ends in bank 0 (also after a failed read-back); the UI filter bytes and their re-selection on an ODR change; and the FIFO timestamp and lost-packet bookkeeping.
+
+```bash
+make -C tests/host test
+```
 
 ---
 
@@ -712,6 +797,13 @@ In the simulation harness (`extras/hosttest`, `make accuracy`), none of the swit
 | `fifoOverflowed()` | True if the FIFO overflowed since the last call (self-clearing) |
 | `getFIFOOverflowCount()` | Total overflow events since boot |
 | `resetFIFOOverflowCount()` | Clear the overflow counter and flag |
+| `getLostPacketCount()` / `resetLostPacketCount()` | Packets the chip reports having discarded (`FIFO_LOST_PKT`) |
+| `hasFIFOTimestamp()` / `getFIFOTimestamp()` | 16-bit ODR timestamp (µs) of the last FIFO packet returned |
+| `setAntiAliasFilter(gyroHz, accelHz)` | Nearest AAF table row for each (`0` = off); see [Anti-alias and UI filters](#anti-alias-and-ui-filters-icm-42688-p) |
+| `setGyroAntiAliasFilter(hz)` / `setAccelAntiAliasFilter(hz)` | One AAF only |
+| `getGyroAntiAliasFilterHz()` / `getAccelAntiAliasFilterHz()` | AAF 3 dB frequency in effect (`0` = off) |
+| `setUIFilter(gyroHz, accelHz)` / `setUIFilterOrder(g, a)` | UI filter bandwidth (nearest, follows ODR changes) / order |
+| `getGyroUIFilterHz()` / `getAccelUIFilterHz()` | UI filter bandwidth in effect |
 | `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
 | `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
 | `readTemperature()` | Read internal IMU temperature |

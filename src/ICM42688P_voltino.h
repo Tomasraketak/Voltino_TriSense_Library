@@ -75,6 +75,37 @@ typedef TriSenseNoRef<decltype(SPI)>::type TriSenseSPIClass;
 #define ICM42688_REG_GYRO_CONFIG0  0x4F
 #define ICM42688_REG_ACCEL_CONFIG0 0x50
 
+// --- Filter registers (DS-000347, sections 5.2-5.4 and the register map) ---
+// Bank 0 - UI filter (the decimation filter after the AAF). Read-modify-write:
+// the other fields of GYRO_CONFIG1 / ACCEL_CONFIG1 are left at their values.
+#define ICM42688_REG_GYRO_CONFIG1       0x51  // [3:2] GYRO_UI_FILT_ORD, [1:0] GYRO_DEC2_M2_ORD; reset 0x16
+#define ICM42688_REG_GYRO_ACCEL_CONFIG0 0x52  // [7:4] ACCEL_UI_FILT_BW, [3:0] GYRO_UI_FILT_BW; reset 0x11
+#define ICM42688_REG_ACCEL_CONFIG1      0x53  // [4:3] ACCEL_UI_FILT_ORD, [2:1] ACCEL_DEC2_M2_ORD; reset 0x0D
+#define ICM42688_SHIFT_GYRO_UI_FILT_ORD   2
+#define ICM42688_SHIFT_ACCEL_UI_FILT_ORD  3
+// Bank 1 - gyro anti-alias filter
+#define ICM42688_B1_GYRO_CONFIG_STATIC2  0x0B  // bit 1 GYRO_AAF_DIS, bit 0 GYRO_NF_DIS; reset 0xA0
+#define ICM42688_B1_GYRO_CONFIG_STATIC3  0x0C  // [5:0] GYRO_AAF_DELT; reset 0x0D (13)
+#define ICM42688_B1_GYRO_CONFIG_STATIC4  0x0D  // [7:0] GYRO_AAF_DELTSQR[7:0]; reset 0xAA (170)
+#define ICM42688_B1_GYRO_CONFIG_STATIC5  0x0E  // [7:4] GYRO_AAF_BITSHIFT, [3:0] GYRO_AAF_DELTSQR[11:8]; reset 0x80
+#define ICM42688_BIT_GYRO_AAF_DIS        0x02
+// Bank 2 - accel anti-alias filter
+#define ICM42688_B2_ACCEL_CONFIG_STATIC2 0x03  // [6:1] ACCEL_AAF_DELT, bit 0 ACCEL_AAF_DIS; reset 0x30 (24)
+#define ICM42688_B2_ACCEL_CONFIG_STATIC3 0x04  // [7:0] ACCEL_AAF_DELTSQR[7:0]; reset 0x40
+#define ICM42688_B2_ACCEL_CONFIG_STATIC4 0x05  // [7:4] ACCEL_AAF_BITSHIFT, [3:0] ACCEL_AAF_DELTSQR[11:8]; reset 0x62
+#define ICM42688_BIT_ACCEL_AAF_DIS       0x01
+// Power-on AAF settings: gyro DELT 13 = 585 Hz, accel DELT 24 = 1163 Hz.
+#define ICM42688_AAF_GYRO_RESET_DELT     13
+#define ICM42688_AAF_ACCEL_RESET_DELT    24
+#define ICM42688_AAF_DELT_MAX            63
+// UI_FILT_BW power-on value: 1 = max(400 Hz, ODR)/4
+#define ICM42688_UI_FILT_BW_RESET        1
+
+// FIFO packet header (byte 0) bits 3:2: 0b10 = the packet carries the ODR
+// timestamp (TMST_CONFIG.TMST_EN, on at power-on, 1 us per LSB at TMST_RES = 0).
+#define ICM42688_FIFO_HEADER_TMST_MASK   0x0C
+#define ICM42688_FIFO_HEADER_TMST_ODR    0x08
+
 #define ICM_ADDR_PRIMARY 0x68
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
@@ -183,6 +214,13 @@ enum ICM_FIFO_MODE {
   FIFO_NONE = 0,        // Standard register read (no FIFO)
   FIFO_16BIT = 1,       // 16-bit FIFO (Packet format 3)
   FIFO_20BIT_HIRES = 2  // 20-bit High-Res FIFO (Packet format 4)
+};
+
+// Order of the UI filter (GYRO_UI_FILT_ORD / ACCEL_UI_FILT_ORD). Power-on: 2nd.
+enum ICM_UI_FILT_ORDER {
+  UI_FILT_1ST_ORDER = 0,
+  UI_FILT_2ND_ORDER = 1,
+  UI_FILT_3RD_ORDER = 2
 };
 
 class ICM42688P {
@@ -316,6 +354,72 @@ public:
   // wraps; this accumulates it into 32 across refills.
   uint32_t getLostPacketCount();
   void resetLostPacketCount();
+
+  // --- Anti-alias filter (AAF) ---
+  // The AAF sits in front of the decimator and is what keeps vibration above
+  // the output Nyquist from folding down into the band the fusion sees. Its
+  // 3 dB frequency is set by three coefficients (AAF_DELT, AAF_DELTSQR,
+  // AAF_BITSHIFT) that must come as a triple from the datasheet's AAF table
+  // (DS-000347 section 5.3: 63 steps, 42 Hz ... 3979 Hz). These calls pick the
+  // table row NEAREST to the requested frequency (a tie goes to the lower one)
+  // and write all three coefficients, so an inconsistent triple is impossible.
+  //
+  //   hz = 0  disables that sensor's AAF (AAF_DIS = 1)
+  //   hz < 42 / > 3979 is clamped to the first / last table row
+  //
+  // The coefficients live in register banks 1 (gyro) and 2 (accel). The write
+  // selects the bank through REG_BANK_SEL and ALWAYS returns to bank 0. As the
+  // datasheet asks (section 12.9), the gyro and accel are switched off while
+  // these static registers change: if they are running, the call waits out the
+  // 45 ms gyro minimum on-time, turns them off, writes, turns them back on,
+  // waits the 30 ms gyro start-up and flushes the FIFO. Budget ~80 ms - call it
+  // during setup, not in flight. Asleep (sleep()) the sensors stay off.
+  //
+  // Every coefficient is read back after the write. Returns false if the chip
+  // did not take the value; the getters then report what the chip really holds.
+  // The settings are kept across sleep()/wake(); begin() (soft reset) restores
+  // the power-on defaults (gyro 585 Hz, accel 1163 Hz).
+  bool setAntiAliasFilter(uint16_t gyroHz, uint16_t accelHz);
+  bool setGyroAntiAliasFilter(uint16_t hz);
+  bool setAccelAntiAliasFilter(uint16_t hz);
+  uint16_t getGyroAntiAliasFilterHz();   // 3 dB frequency in effect; 0 = AAF disabled
+  uint16_t getAccelAntiAliasFilterHz();  // 3 dB frequency in effect; 0 = AAF disabled
+  // The table row the setters would choose for hz, without touching the chip:
+  // returns its 3 dB frequency (0 for hz = 0) and, if given, its coefficients.
+  static uint16_t antiAliasFilterLookup(uint16_t hz, uint8_t *delt = nullptr,
+                                        uint16_t *deltSqr = nullptr, uint8_t *bitShift = nullptr);
+
+  // --- UI filter (output low-pass, GYRO_ACCEL_CONFIG0 / *_CONFIG1) ---
+  // The UI filter runs after the AAF at the output data rate. Its bandwidth is
+  // a fraction of the ODR (Low Noise mode, DS-000347 register GYRO_ACCEL_CONFIG0):
+  //   0: ODR/2   1: max(400 Hz, ODR)/4 (power-on)   2: max(400 Hz, ODR)/5
+  //   3: max(400 Hz, ODR)/8   4: /10   5: /16   6: /20   7: max(400 Hz, ODR)/40
+  // setUIFilter() picks the setting nearest to the requested bandwidth at the
+  // ODR currently in effect (tie -> lower) and REMEMBERS the request: when the
+  // ODR later changes (setODR, the bandwidth limiter, stepDownODR) the nearest
+  // setting is chosen again for the new ODR. The getters return the nominal
+  // bandwidth (Hz) of the setting in effect, for the ODR in effect; the actual
+  // -3 dB point also depends on the filter order. The low-latency settings
+  // 14/15 are not used. UI filter registers are in bank 0 and may change
+  // while the sensors run; nothing is power-cycled. Returns false if the
+  // read-back does not match.
+  bool setUIFilter(float gyroHz, float accelHz);
+  bool setUIFilterOrder(ICM_UI_FILT_ORDER gyroOrder, ICM_UI_FILT_ORDER accelOrder);
+  float getGyroUIFilterHz();
+  float getAccelUIFilterHz();
+  ICM_UI_FILT_ORDER getGyroUIFilterOrder() { return (ICM_UI_FILT_ORDER)_uiGyroOrd; }
+  ICM_UI_FILT_ORDER getAccelUIFilterOrder() { return (ICM_UI_FILT_ORDER)_uiAccelOrd; }
+
+  // --- FIFO timestamp ---
+  // Each FIFO packet carries a 16-bit ODR timestamp (1 us per LSB at the
+  // power-on TMST_CONFIG, sensor's own clock, wraps every 65.536 ms). These
+  // report the one in the packet the last readIMU()/readFIFO() returned.
+  // The difference of two consecutive timestamps (mod 65536) is the true
+  // sample spacing: a jump of ~2x the ODR period means a sample went missing.
+  // hasFIFOTimestamp() is false in FIFO_NONE mode, before the first packet,
+  // and when the packet header says the field holds no ODR timestamp.
+  bool hasFIFOTimestamp() { return _fifoTsValid; }
+  uint16_t getFIFOTimestamp() { return _fifoTs; }
 
   // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
@@ -460,6 +564,25 @@ private:
   uint32_t _lostPacketTotal = 0;    // Accumulated across wraps of the 16-bit register
   uint16_t _lostPacketLastRaw = 0;  // Previous raw reading, to detect the wrap
   bool _lostPacketPrimed = false;
+
+  // Filter state, mirrored from the chip (power-on values until changed).
+  uint8_t _aafGyroDelt = ICM42688_AAF_GYRO_RESET_DELT;   // 0 = disabled
+  uint8_t _aafAccelDelt = ICM42688_AAF_ACCEL_RESET_DELT; // 0 = disabled
+  uint8_t _uiGyroBw = ICM42688_UI_FILT_BW_RESET;
+  uint8_t _uiAccelBw = ICM42688_UI_FILT_BW_RESET;
+  uint8_t _uiGyroOrd = UI_FILT_2ND_ORDER;
+  uint8_t _uiAccelOrd = UI_FILT_2ND_ORDER;
+  float _uiGyroReqHz = 0;    // 0 = never requested: the ODR path leaves the UI filter alone
+  float _uiAccelReqHz = 0;
+  uint16_t _fifoTs = 0;
+  bool _fifoTsValid = false;
+
+  void resetFilterState();
+  bool writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt);
+  bool applyUIFilterBandwidth();
+  float uiFilterHz(uint8_t bw);
+  uint8_t uiFilterBwFor(float hz);
+  void noteFIFOTimestamp(const uint8_t *packet, uint8_t tsOffset);
 
   void scaleSample(const int32_t raw[6], float aScale, float gScale,
                    float &ax, float &ay, float &az, float &gx, float &gy, float &gz);

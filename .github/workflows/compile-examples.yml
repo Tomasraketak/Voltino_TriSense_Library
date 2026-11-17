@@ -158,6 +158,15 @@ jobs:
           enable-deltas-report: true
           verbose: false
 
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Register-level tests of the ICM-42688-P driver (filters, banks, FIFO).
+      - run: make -C tests/host test
+      - run: make -C tests/host -B test CXXFLAGS_EXTRA=-DTRISENSE_LITE=1
+
   lint:
     name: Arduino Lint
     runs-on: ubuntu-latest
