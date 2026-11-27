@@ -278,6 +278,156 @@ static void testFifoTimestampAndLost() {
   CHECK(imu.getFIFOTimestamp() == 0x2000, "timestamp of the first packet in the burst");
 }
 
+// ---------------------------------------------------------------------------
+// Sample tap: sees exactly what readIMU()/readFIFO() hand out
+// ---------------------------------------------------------------------------
+
+struct TapSample { float a[3], g[3]; };
+struct TapLog { std::vector<TapSample> s; int wrongCtx = 0; };
+static TapLog *g_tapExpectCtx = nullptr;
+
+static void tapFn(const float *acc, const float *gyr, void *ctx) {
+  TapLog *log = static_cast<TapLog *>(ctx);
+  if (log != g_tapExpectCtx) { if (g_tapExpectCtx) g_tapExpectCtx->wrongCtx++; return; }
+  TapSample t;
+  for (int i = 0; i < 3; i++) { t.a[i] = acc[i]; t.g[i] = gyr[i]; }
+  log->s.push_back(t);
+}
+
+static void packet16Data(uint8_t *p, uint8_t header, int i) {
+  memset(p, 0, 16);
+  p[0] = header;
+  for (int k = 0; k < 6; k++) {          // Six distinct signed 16-bit values per packet
+    int16_t v = (int16_t)((i * 37 + k * 1009) * ((k & 1) ? -1 : 1));
+    p[1 + 2 * k] = (uint8_t)((uint16_t)v >> 8);
+    p[2 + 2 * k] = (uint8_t)v;
+  }
+  p[14] = (uint8_t)(i >> 8);
+  p[15] = (uint8_t)i;
+}
+
+static void packet20Data(uint8_t *p, int i) {
+  memset(p, 0, 20);
+  p[0] = 0x78;
+  for (int k = 1; k <= 12; k++) p[k] = (uint8_t)(i * 13 + k * 29);
+  p[17] = (uint8_t)(i * 7 + 0x35);
+  p[18] = (uint8_t)(i * 11 + 0x9C);
+  p[19] = (uint8_t)(i * 5 + 0xE1);
+}
+
+// Drains with readFIFO() and compares every returned sample with the tap log.
+static void drainAndCompare(ICM42688P &imu, TapLog &log, int expect, const char *what) {
+  std::vector<TapSample> got;
+  float ax, ay, az, gx, gy, gz;
+  for (int n = 0; n < 1000; n++) {
+    const size_t before = log.s.size();
+    if (!imu.readFIFO(ax, ay, az, gx, gy, gz)) {
+      CHECK(log.s.size() == before, "%s: tap called on a failed read", what);
+      break;
+    }
+    got.push_back({ { ax, ay, az }, { gx, gy, gz } });
+  }
+  CHECK((int)got.size() == expect, "%s: readFIFO returned %u samples, expected %d", what,
+        (unsigned)got.size(), expect);
+  CHECK(log.s.size() == got.size(), "%s: tap saw %u samples, readFIFO returned %u", what,
+        (unsigned)log.s.size(), (unsigned)got.size());
+  size_t n = log.s.size() < got.size() ? log.s.size() : got.size();
+  int mismatches = 0;
+  for (size_t i = 0; i < n; i++)
+    if (memcmp(&log.s[i], &got[i], sizeof(TapSample)) != 0) mismatches++;
+  CHECK(mismatches == 0, "%s: %d samples differ between tap and readFIFO", what, mismatches);
+  CHECK(log.wrongCtx == 0, "%s: ctx altered %d times", what, log.wrongCtx);
+}
+
+static void testSampleTap() {
+  section("Sample tap");
+  ICM42688P imu;
+  CHECK(beginImu(imu), "begin");
+  imu.setFIFOMode(FIFO_16BIT);
+  imu.flushFIFO();
+  // Non-trivial calibration: the tap must see the corrected values.
+  imu.setAccelOffset(0.01f, -0.02f, 0.03f);
+  imu.setAccelScale(1.01f, 0.99f, 1.002f);
+  imu.setGyroOffset(0.5f, -0.25f, 0.125f);
+
+  TapLog log;
+  g_tapExpectCtx = &log;
+  imu.setSampleTap(&tapFn, &log);
+
+  // 16-bit: more packets than one burst holds (several refills), with
+  // message packets (header bit 7) scattered in, including at burst edges.
+  uint8_t p[20];
+  const int total = 3 * 32 + 11;
+  int valid = 0;
+  for (int i = 0; i < total; i++) {
+    if (i % 9 == 4 || i == 31 || i == 32) { packet16Data(p, 0x80, i); stub_fifo_push(p, 16); }
+    packet16Data(p, 0x68, i); stub_fifo_push(p, 16); valid++;
+  }
+  drainAndCompare(imu, log, valid, "16-bit FIFO");
+
+  // Order and values against packet content: sample k carries index k in
+  // its timestamp field, so check the first and last explicitly too.
+  if (log.s.size() == (size_t)valid) {
+    CHECK(log.s.front().a[0] != log.s.back().a[0], "first and last tap sample identical");
+  }
+
+  // Empty FIFO: false, and no tap call.
+  float ax, ay, az, gx, gy, gz;
+  size_t before = log.s.size();
+  CHECK(!imu.readIMU(ax, ay, az, gx, gy, gz), "read from an empty FIFO succeeded");
+  CHECK(log.s.size() == before, "tap called with an empty FIFO");
+
+  // Disabled tap: reads still work, tap never runs.
+  imu.setSampleTap(nullptr);
+  for (int i = 0; i < 5; i++) { packet16Data(p, 0x68, 500 + i); stub_fifo_push(p, 16); }
+  int reads = 0;
+  while (imu.readFIFO(ax, ay, az, gx, gy, gz)) reads++;
+  CHECK(reads == 5, "reads with the tap off: %d", reads);
+  CHECK(log.s.size() == before, "tap ran after setSampleTap(nullptr)");
+
+  // Re-enabled with a different ctx: that ctx arrives unchanged.
+  TapLog log2;
+  g_tapExpectCtx = &log2;
+  imu.setSampleTap(&tapFn, &log2);
+  for (int i = 0; i < 7; i++) { packet16Data(p, 0x68, 700 + i); stub_fifo_push(p, 16); }
+  drainAndCompare(imu, log2, 7, "16-bit FIFO, new ctx");
+  CHECK(log.s.size() == before, "old ctx still receiving samples");
+
+#if !TRISENSE_LITE
+  // 20-bit HiRes path.
+  TapLog log3;
+  g_tapExpectCtx = &log3;
+  imu.setSampleTap(&tapFn, &log3);
+  imu.setFIFOMode(FIFO_20BIT_HIRES);
+  imu.flushFIFO();
+  for (int i = 0; i < 45; i++) {
+    if (i == 20) { packet20Data(p, i); p[0] = 0x80; stub_fifo_push(p, 20); }
+    packet20Data(p, i); stub_fifo_push(p, 20);
+  }
+  drainAndCompare(imu, log3, 45, "20-bit FIFO");
+#endif
+
+  // Direct register mode: one sample per read.
+  TapLog log4;
+  g_tapExpectCtx = &log4;
+  imu.setSampleTap(&tapFn, &log4);
+  imu.setFIFOMode(FIFO_NONE);
+  for (int k = 0; k < 12; k++) stub_set_reg(0, (uint8_t)(0x1F + k), (uint8_t)(k * 17 + 3));
+  CHECK(imu.readIMU(ax, ay, az, gx, gy, gz), "direct read");
+  CHECK(log4.s.size() == 1, "direct read: tap saw %u samples", (unsigned)log4.s.size());
+  if (log4.s.size() == 1) {
+    const TapSample &t = log4.s[0];
+    CHECK(t.a[0] == ax && t.a[1] == ay && t.a[2] == az && t.g[0] == gx && t.g[1] == gy && t.g[2] == gz,
+          "direct read: tap values differ");
+  }
+  for (int k = 0; k < 12; k++) stub_set_reg(0, (uint8_t)(0x1F + k), 0xFF);   // Bus-error pattern
+  CHECK(!imu.readIMU(ax, ay, az, gx, gy, gz), "all-0xFF direct read accepted");
+  CHECK(log4.s.size() == 1, "tap called on a rejected direct read");
+
+  imu.setSampleTap(nullptr);
+  g_tapExpectCtx = nullptr;
+}
+
 int main() {
   // Rows: DS-000347 section 5.3. Gyro / accel requests chosen to hit exact
   // rows, nearest-row rounding and both ends of the table.
@@ -299,6 +449,7 @@ int main() {
   testWhileAsleep();
   testUIFilter();
   testFifoTimestampAndLost();
+  testSampleTap();
 
   printf("%d checks, %d failed\n", checks, fails);
   printf(fails ? "FAILED\n" : "ALL PASSED\n");
