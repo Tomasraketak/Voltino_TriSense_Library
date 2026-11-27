@@ -10,6 +10,7 @@ AK09918C	KEYWORD1
 AdvancedTriFusion	KEYWORD1
 BMP580	KEYWORD1
 ICM42688P	KEYWORD1
+SampleTap	KEYWORD1
 TriSenseSPIClass	KEYWORD1
 SimpleTriFusion	KEYWORD1
 TriSense	KEYWORD1
@@ -145,6 +146,7 @@ setMountOrientation	KEYWORD2
 setODR	KEYWORD2
 setOversampling	KEYWORD2
 setPowerMode	KEYWORD2
+setSampleTap	KEYWORD2
 setSpiMode	KEYWORD2
 setSpiPinRelease	KEYWORD2
 sleep	KEYWORD2

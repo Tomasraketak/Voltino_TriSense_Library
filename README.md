@@ -8,6 +8,8 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
+> **New in v1.7.0:** ICM-42688-P sample tap — `imu.setSampleTap(fn, ctx)` passes every sample `readIMU()`/`readFIFO()` hands out to a callback, so a second consumer (e.g. a vibration analyser) sees the full stream while the fusion code stays the only FIFO reader ([details](#-sample-tap--a-second-consumer-without-a-second-fifo-reader)).
+
 > **New in v1.6.0:** SPI pin release on RP2040/RP2350, AVR, megaAVR, SAMD, ESP32, Teensy and STM32 — removes a 30–50 mA cross-conduction between the MCU and the TriSense Pro's SCK/MOSI level shifter ([details](#spi-pin-release-trisense-pro-level-shifter)), I2C interface of the IMU disabled in SPI mode, optional SPI mode 3, `TriSenseConfig` for magnetometer/barometer/IMU rates, `TriSense::sleep()` / `wake()`, BMP580 OSR/ODR validity check, and a `LowPower` example.
 
 > **New in v1.3.0:** Tilt-compensated magnetometer-only heading (`getMagHeadingDegrees()`), full-batch accelerometer averaging for world-frame acceleration, corrected yaw gyro-bias learning, FIFO overflow detection, burst FIFO reads (~18× fewer bus transactions), and a custom SPI/I2C pin-mapping example.
@@ -495,6 +497,28 @@ In 20-bit mode the packet's 20-bit field is the 16-bit sample shifted left by 4 
 
 Faster draining directly reduces the chance of overflowing the FIFO in the first place. On I2C the bulk read is automatically split into Wire-buffer-sized chunks; the FIFO read pointer advances per byte, so packets still stream consecutively.
 
+### 🔌 Sample Tap — a second consumer without a second FIFO reader
+
+The FIFO is a queue: every packet can be handed out **once**. If two pieces of code both call `readFIFO()` — say a fusion library draining it for attitude and a vibration analyser wanting the raw stream — each gets only the packets the other did not take. Neither sees a complete, evenly spaced signal: the fusion integrates with gaps (lost rotation, and a `dt` that no longer matches), and the analyser's spectrum is aliased by irregular sampling. Nothing reports an error; the data is just quietly wrong.
+
+`setSampleTap()` solves this without touching the bus. Register a callback and the driver calls it with **every sample `readIMU()` / `readFIFO()` successfully hands out**, whoever the caller is, in the same calibrated units (g, °/s — accel offset/scale and gyro offset already applied), in FIFO order. The fusion code stays the only FIFO reader; the tap just watches the stream go by.
+
+```cpp
+// e.g. a vibration analyser fed at the full IMU rate (2 kHz -> 0.5-500 Hz)
+static void onSample(const float acc_g[3], const float gyr_dps[3], void *ctx) {
+  static_cast<VibAnalyzer *>(ctx)->push(acc_g, gyr_dps);   // copy into a ring buffer, return
+}
+
+sensor.imu.setSampleTap(&onSample, &analyzer);   // ctx is passed back unchanged
+// ... fusion.update() / any readFIFO() drain now also feeds the analyser ...
+sensor.imu.setSampleTap(nullptr);                // off again
+```
+
+- Called only after a successful read; a `false` from `readIMU()` (empty FIFO, bus error) produces no call. Message/empty packets the driver skips are never passed on.
+- Works in all three modes (`FIFO_NONE`, `FIFO_16BIT`, `FIFO_20BIT_HIRES`) and in `TRISENSE_LITE` builds.
+- It runs **inside the reader's call** (possibly in the middle of a drain of hundreds of packets): keep it short — copy into a buffer and return. No printing, no blocking, no bus access, and no calls back into `readIMU()`/`readFIFO()`.
+- With no tap set, the cost is one pointer test per sample.
+
 ### 🧭 Magnetometer Calibration Order
 
 Hard iron is a fixed offset in the magnetometer's **own physical axes**, and soft iron a linear distortion in those same axes — both are properties of the sensor and whatever magnetic material sits next to it. MotionCal therefore fits them in raw sensor axes, and the library removes them **before** `setMountOrientation()`'s axis remapping. Only the corrected, physically-real field vector is rotated into the mount frame.
@@ -806,6 +830,7 @@ In the simulation harness (`extras/hosttest`, `make accuracy`), none of the swit
 | `getGyroUIFilterHz()` / `getAccelUIFilterHz()` | UI filter bandwidth in effect |
 | `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
 | `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
+| `setSampleTap(fn, ctx)` | Call `fn(acc_g, gyr_dps, ctx)` with every sample `readIMU()`/`readFIFO()` returns; `nullptr` disables |
 | `readTemperature()` | Read internal IMU temperature |
 | `setAccelOffset(x, y, z)` | Set software accelerometer offsets (**sensor axes**) |
 | `setAccelScale(x, y, z)` | Set software accelerometer scale factors (**sensor axes**) |

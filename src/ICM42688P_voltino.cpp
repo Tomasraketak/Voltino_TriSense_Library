@@ -1296,14 +1296,23 @@ void ICM42688P::noteFIFOTimestamp(const uint8_t *packet, uint8_t tsOffset) {
 }
 
 bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  bool ok;
   switch (_fifoMode) {
-    case FIFO_NONE: return readSensorData(ax, ay, az, gx, gy, gz);
-    case FIFO_16BIT: return readHardwareFIFO(ax, ay, az, gx, gy, gz);
+    case FIFO_NONE: ok = readSensorData(ax, ay, az, gx, gy, gz); break;
+    case FIFO_16BIT: ok = readHardwareFIFO(ax, ay, az, gx, gy, gz); break;
 #if !TRISENSE_LITE
-    case FIFO_20BIT_HIRES: return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
+    case FIFO_20BIT_HIRES: ok = readHardwareFIFOHires(ax, ay, az, gx, gy, gz); break;
 #endif
-    default: return false;
+    default: ok = false; break;
   }
+  // Sample tap (see setSampleTap): every sample handed out, after calibration.
+  // readFIFO() goes through here too, so both entry points are covered.
+  if (ok && _sampleTap) {
+    const float a[3] = { ax, ay, az };
+    const float g[3] = { gx, gy, gz };
+    _sampleTap(a, g, _sampleTapCtx);
+  }
+  return ok;
 }
 
 bool ICM42688P::readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {

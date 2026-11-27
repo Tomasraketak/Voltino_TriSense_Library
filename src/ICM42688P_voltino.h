@@ -435,6 +435,17 @@ public:
 #endif
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
+  // --- Sample tap ---
+  // Called with every sample readIMU()/readFIFO() hands out, in the same
+  // calibrated units (g, deg/s), after the read succeeded. Runs in the
+  // reader's context - keep it short and non-blocking. nullptr disables it.
+  //
+  // Lets a second consumer (e.g. a vibration analyser) see the full sample
+  // stream while the fusion code stays the only one draining the FIFO: a
+  // second readFIFO() caller would steal packets from the first.
+  typedef void (*SampleTap)(const float acc_g[3], const float gyr_dps[3], void *ctx);
+  void setSampleTap(SampleTap fn, void *ctx = nullptr) { _sampleTap = fn; _sampleTapCtx = ctx; }
+
   // --- Calibration ---
   // Selects register bank 0, the bank every other call in this driver expects.
   // Kept as a recovery hook: if a sketch talks to the chip directly and leaves
@@ -488,6 +499,9 @@ public:
   float getGyroOffsetZ();
 
 private:
+  SampleTap _sampleTap = nullptr;
+  void *_sampleTapCtx = nullptr;
+
   TwoWire* _wire = &Wire;
   TriSenseSPIClass* _spi = &SPI;
   ICM_BUS _bus = BUS_I2C;
