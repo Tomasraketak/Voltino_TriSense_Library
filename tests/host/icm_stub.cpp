@@ -9,8 +9,9 @@ SPIClass SPI;
 TwoWire Wire;
 
 static uint32_t g_us = 0;
-uint32_t millis() { return g_us / 1000; }
-uint32_t micros() { return g_us; }
+static bool g_clockRuns = false;   // Streaming: reading the clock costs time, as on a real MCU
+uint32_t millis() { if (g_clockRuns) g_us += 1; return g_us / 1000; }
+uint32_t micros() { if (g_clockRuns) g_us += 1; return g_us; }
 void delay(uint32_t ms) { g_us += ms * 1000; }
 void delayMicroseconds(uint32_t us) { g_us += us; }
 void sim_advance_us(uint32_t us) { g_us += us; }
@@ -28,6 +29,44 @@ static uint8_t bank = 0;
 static std::vector<uint8_t> fifo;
 static std::vector<StubAccess> logv;
 static uint16_t lost = 0;
+
+// Streaming FIFO: the chip writes one packet every period, in Stream mode.
+static const size_t FIFO_CAP = 2048;
+static bool streaming = false;
+static uint32_t streamPeriodUs = 0, streamNextUs = 0;
+static uint8_t streamPacket[20];
+static size_t streamPacketSize = 16;
+static size_t streamDropBytes = 0;
+static uint32_t streamOverflows = 0;
+
+static void stream_produce() {
+  if (!streaming) return;
+  while ((int32_t)(g_us - streamNextUs) >= 0) {
+    // Full: the oldest bytes go, streamDropBytes at a time - not necessarily
+    // a whole packet, which is what leaves the read pointer mid-packet.
+    while (fifo.size() + streamPacketSize > FIFO_CAP) {
+      size_t d = streamDropBytes ? streamDropBytes : streamPacketSize;
+      if (d > fifo.size()) d = fifo.size();
+      fifo.erase(fifo.begin(), fifo.begin() + d);
+      streamOverflows++;
+      lost++;
+    }
+    fifo.insert(fifo.end(), streamPacket, streamPacket + streamPacketSize);
+    streamNextUs += streamPeriodUs;
+  }
+}
+
+void stub_stream(uint32_t periodUs, const uint8_t *packet, size_t size, size_t dropBytes) {
+  streaming = periodUs > 0;
+  g_clockRuns = streaming;
+  streamPeriodUs = periodUs;
+  streamNextUs = g_us + periodUs;
+  if (packet) memcpy(streamPacket, packet, size);
+  streamPacketSize = size;
+  streamDropBytes = dropBytes;
+  streamOverflows = 0;
+}
+uint32_t stub_stream_overflows() { return streamOverflows; }
 
 static void power_on() {
   memset(r, 0, sizeof r);
@@ -49,7 +88,7 @@ static void power_on() {
   lost = 0;
 }
 
-void stub_reset() { power_on(); memset(ro, 0, sizeof ro); logv.clear(); g_us = 1000000; }
+void stub_reset() { streaming = false; g_clockRuns = false; power_on(); memset(ro, 0, sizeof ro); logv.clear(); g_us = 1000000; }
 size_t stub_log_size() { return logv.size(); }
 const StubAccess &stub_log(size_t i) { return logv[i]; }
 void stub_log_clear() { logv.clear(); }
@@ -62,6 +101,7 @@ void stub_set_lost(uint16_t v) { lost = v; }
 
 static uint8_t icm_read(uint8_t reg) {
   uint8_t v;
+  if (bank == 0 && (reg == 0x2E || reg == 0x30)) stream_produce();
   if (reg == REG_BANK_SEL) v = bank;
   else if (bank == 0 && reg == 0x30) {            // FIFO_DATA pops
     if (fifo.empty()) v = 0xFF;

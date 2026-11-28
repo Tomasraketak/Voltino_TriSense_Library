@@ -23,3 +23,10 @@ void stub_set_readonly(uint8_t bank, uint8_t reg, bool ro);  // Writes are ignor
 uint8_t stub_bank();                     // Bank currently selected
 void stub_fifo_push(const uint8_t *bytes, size_t n);
 void stub_set_lost(uint16_t lost);
+// Streaming FIFO: from now on the chip writes `packet` every periodUs of
+// simulated time (and reading the clock advances it). When the 2 KB FIFO is
+// full the oldest dropBytes bytes are discarded (0 = one whole packet), so a
+// dropBytes that is not a packet multiple leaves the FIFO misaligned.
+// periodUs = 0 stops it.
+void stub_stream(uint32_t periodUs, const uint8_t *packet, size_t size, size_t dropBytes);
+uint32_t stub_stream_overflows();

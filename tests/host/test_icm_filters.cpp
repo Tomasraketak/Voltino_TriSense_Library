@@ -428,6 +428,105 @@ static void testSampleTap() {
   g_tapExpectCtx = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// FIFO alignment and calibration at an ODR above 1 kHz
+// ---------------------------------------------------------------------------
+
+// A still sensor at 2000 dps / 16 g: gyro 33, -49, 16 LSB, accel 0, 0, 1 g.
+static void stillPacket16(uint8_t *p) {
+  memset(p, 0, 16);
+  p[0] = 0x68;
+  const int16_t v[6] = { 0, 0, 2048, 33, -49, 16 };
+  for (int k = 0; k < 6; k++) {
+    p[1 + 2 * k] = (uint8_t)((uint16_t)v[k] >> 8);
+    p[2 + 2 * k] = (uint8_t)v[k];
+  }
+}
+
+static void testFifoResync() {
+  section("FIFO: a misaligned packet is detected and the FIFO resynchronised");
+  ICM42688P imu;
+  CHECK(beginImu(imu), "begin");
+  imu.setFIFOMode(FIFO_16BIT);
+  uint8_t p[16];
+  for (int i = 0; i < 3; i++) { packet16Data(p, 0x68, i); stub_fifo_push(p, 16); }
+  const uint8_t junk[6] = { 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC };   // Half a packet
+  stub_fifo_push(junk, 6);
+  for (int i = 3; i < 8; i++) { packet16Data(p, 0x68, i); stub_fifo_push(p, 16); }
+
+  float ax, ay, az, gx, gy, gz;
+  int good = 0;
+  while (imu.readIMU(ax, ay, az, gx, gy, gz)) good++;
+  CHECK(good == 3, "%d aligned packets read before the fragment, expected 3", good);
+  CHECK(imu.getFIFOResyncCount() == 1, "resync count %u, expected 1", (unsigned)imu.getFIFOResyncCount());
+  CHECK(stub_log_size() > 0, "log");
+  bool flushed = false;
+  for (size_t i = 0; i < stub_log_size(); i++) {
+    const StubAccess &a = stub_log(i);
+    if (a.write && a.bank == 0 && a.reg == 0x4B && (a.val & 0x02)) flushed = true;
+  }
+  CHECK(flushed, "FIFO not flushed after the misaligned packet");
+  packet16Data(p, 0x68, 99); stub_fifo_push(p, 16);
+  CHECK(imu.readIMU(ax, ay, az, gx, gy, gz), "reading resumes after the flush");
+}
+
+static void testGyroCalibration2kHz() {
+  section("Gyro calibration at 2 kHz with a FIFO that would overflow on a 1 ms read clock");
+  ICM42688P imu;
+  CHECK(beginImu(imu), "begin");
+  imu.setAccelFS(AFS_16G);
+  imu.setGyroFS(GFS_2000DPS);
+  imu.setFIFOMode(FIFO_16BIT);
+  imu.setODR(ODR_2KHZ);
+  CHECK(imu.getODRHz() == 2000, "ODR %d Hz", imu.getODRHz());
+  uint8_t p[16];
+  stillPacket16(p);
+  stub_fifo_push(p, 16);              // Something from before the call
+  stub_stream(500, p, 16, 6);         // 2 kHz; a full FIFO drops 6 bytes: misaligns
+  imu.autoCalibrateGyro(1000);
+  const uint32_t overflows = stub_stream_overflows();
+  stub_stream(0, nullptr, 16, 0);
+
+  const float lsb = 2000.0f / 32768.0f;
+  float ox, oy, oz;
+  imu.getGyroOffset(ox, oy, oz);
+  CHECK(fabsf(ox - 33 * lsb) < 1e-3f && fabsf(oy + 49 * lsb) < 1e-3f && fabsf(oz - 16 * lsb) < 1e-3f,
+        "offset %.4f %.4f %.4f, expected %.4f %.4f %.4f", ox, oy, oz, 33 * lsb, -49 * lsb, 16 * lsb);
+  CHECK(overflows == 0, "FIFO overflowed %u times during calibration", (unsigned)overflows);
+  CHECK(imu.getODRHz() == 2000, "calibration stepped the ODR down to %d Hz", imu.getODRHz());
+}
+
+static void testFifoOverflowStaysAligned() {
+  section("Reading after a mid-packet overflow: no sample is ever misaligned");
+  ICM42688P imu;
+  CHECK(beginImu(imu), "begin");
+  imu.setAccelFS(AFS_16G);
+  imu.setGyroFS(GFS_2000DPS);
+  imu.setFIFOMode(FIFO_16BIT);
+  imu.setODR(ODR_2KHZ);
+  uint8_t p[16];
+  stillPacket16(p);
+  stub_stream(500, p, 16, 6);
+  delay(300);                          // A stalled loop: the FIFO overflows mid-packet
+  const float lsb = 2000.0f / 32768.0f;
+  float ax, ay, az, gx, gy, gz;
+  int read = 0, bad = 0;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 200) {
+    if (imu.readIMU(ax, ay, az, gx, gy, gz)) {
+      read++;
+      if (fabsf(gx - 33 * lsb) > 1e-3f || fabsf(gy + 49 * lsb) > 1e-3f || fabsf(gz - 16 * lsb) > 1e-3f ||
+          fabsf(az - 1.0f) > 1e-3f) bad++;
+    }
+  }
+  const uint32_t overflows = stub_stream_overflows();
+  stub_stream(0, nullptr, 16, 0);
+  CHECK(overflows > 0, "the test did not overflow the FIFO");
+  CHECK(read > 100, "only %d samples read", read);
+  CHECK(bad == 0, "%d of %d samples misaligned", bad, read);
+  CHECK(imu.getFIFOResyncCount() >= 1, "no resync after a mid-packet overflow");
+}
+
 int main() {
   // Rows: DS-000347 section 5.3. Gyro / accel requests chosen to hit exact
   // rows, nearest-row rounding and both ends of the table.
@@ -450,6 +549,9 @@ int main() {
   testUIFilter();
   testFifoTimestampAndLost();
   testSampleTap();
+  testFifoResync();
+  testGyroCalibration2kHz();
+  testFifoOverflowStaysAligned();
 
   printf("%d checks, %d failed\n", checks, fails);
   printf(fails ? "FAILED\n" : "ALL PASSED\n");

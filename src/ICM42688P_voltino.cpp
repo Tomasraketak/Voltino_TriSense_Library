@@ -919,6 +919,7 @@ void ICM42688P::resetFIFOOverflowCount() {
 }
 
 uint32_t ICM42688P::getLostPacketCount() { return _lostPacketTotal; }
+uint32_t ICM42688P::getFIFOResyncCount() { return _fifoResyncCount; }
 
 void ICM42688P::resetLostPacketCount() {
   _lostPacketTotal = 0;
@@ -1370,7 +1371,29 @@ const uint8_t* ICM42688P::nextFIFOPacket() {
     }
     const uint8_t* packet = _fifoBuf + (size_t)_fifoBufIndex * _fifoPacketSize;
     _fifoBufIndex++;
-    if ((packet[0] & 0x80) == 0) return packet;
+    const uint8_t header = packet[0];
+    if (header & ICM42688_FIFO_HEADER_MSG) continue;   // Empty / message packet: skip it
+
+    // A data packet in the configured layout carries accel AND gyro, and
+    // HEADER_20 matches the mode. Anything else means the burst no longer starts
+    // on a packet boundary: in Stream mode a full FIFO drops its oldest data,
+    // and with FIFO_RESUME_PARTIAL_RD set the read pointer can come out of that
+    // in the middle of a packet. Every packet after it is then read shifted -
+    // a gyro field made of another field's bytes, a large, steady, wrong rate
+    // that a gyro calibration averages straight into the offset. The header is
+    // the only marker a packet has, so a wrong one is where alignment is lost:
+    // drop everything buffered, flush the FIFO and start again on the next
+    // packet the chip writes.
+    const uint8_t expect = (_fifoMode == FIFO_20BIT_HIRES)
+        ? (uint8_t)(ICM42688_FIFO_HEADER_ACCEL | ICM42688_FIFO_HEADER_GYRO | ICM42688_FIFO_HEADER_20)
+        : (uint8_t)(ICM42688_FIFO_HEADER_ACCEL | ICM42688_FIFO_HEADER_GYRO);
+    const uint8_t mask = ICM42688_FIFO_HEADER_ACCEL | ICM42688_FIFO_HEADER_GYRO | ICM42688_FIFO_HEADER_20;
+    if ((header & mask) == expect) return packet;
+
+    if (_fifoResyncCount < 0xFFFFFFFFUL) _fifoResyncCount++;
+    _fifoTsValid = false;
+    flushFIFO();
+    return nullptr;
   }
   return nullptr;
 }
@@ -1441,6 +1464,22 @@ float ICM42688P::readTemperature() {
   return ((float)rawTemp / 132.48f) + 25.0f;
 }
 
+// Read pacing for the calibration loops. With a FIFO every sample the chip
+// produced is read, as fast as it arrives: the FIFO is the pacing. Reading on a
+// fixed 1 ms clock - as these loops used to - only matched an ODR of 1 kHz; at
+// 2 kHz the FIFO filled in 64 ms and overflowed for the rest of the run, and an
+// overflowed FIFO can hand out misaligned packets (see nextFIFOPacket()). The
+// FIFO is flushed first so no sample predates the call. Without a FIFO the data
+// registers are read once per sample period of the ODR in effect.
+unsigned long ICM42688P::calibrationReadPeriodUs() {
+  if (_fifoMode != FIFO_NONE) {
+    flushFIFO();
+    return 0;
+  }
+  const int hz = (_odr == ODR_12_5HZ) ? 12 : _getHzFromODR(_odr);
+  return (hz > 0) ? 1000000UL / (unsigned long)hz : 1000UL;
+}
+
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   Serial.println(F("GYRO CALIBRATION (SW)... Keep still."));
   gyrOffset[0] = 0; gyrOffset[1] = 0; gyrOffset[2] = 0;
@@ -1454,6 +1493,7 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   // an offset averaged from a handful of samples - or none at all.
   for (uint8_t attempt = 0; ; attempt++) {
     gxSum = 0; gySum = 0; gzSum = 0; count = 0;
+    const unsigned long periodUs = calibrationReadPeriodUs();   // Per attempt: the ODR may have stepped down
     startT = millis();
     lastMicros = micros();
     bool timedOut = false;
@@ -1465,11 +1505,13 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
         break;
       }
       
-      if (micros() - lastMicros >= 1000) {
+      if (micros() - lastMicros >= periodUs) {
         lastMicros = micros();
         if(readIMU(ax, ay, az, gx, gy, gz)) {
           gxSum += gx; gySum += gy; gzSum += gz;
           count++;
+        } else if (periodUs == 0) {
+          delayMicroseconds(50);   // FIFO empty: let the next sample arrive
         }
       }
     }
@@ -1525,15 +1567,18 @@ void ICM42688P::autoCalibrateAccel() {
     Serial.println(F("Measuring..."));
     double sumX = 0, sumY = 0, sumZ = 0;
     int count = 0;
+    const unsigned long periodUs = calibrationReadPeriodUs();
     unsigned long start = millis();
     unsigned long lastMicros = micros();
     
     while (millis() - start < 1500) {
-      if (micros() - lastMicros >= 1000) { 
+      if (micros() - lastMicros >= periodUs) { 
         lastMicros = micros();
         float ax, ay, az, gx, gy, gz;
         if (readIMU(ax, ay, az, gx, gy, gz)) {
           sumX += ax; sumY += ay; sumZ += az; count++;
+        } else if (periodUs == 0) {
+          delayMicroseconds(50);
         }
       }
     }

@@ -103,6 +103,10 @@ typedef TriSenseNoRef<decltype(SPI)>::type TriSenseSPIClass;
 
 // FIFO packet header (byte 0) bits 3:2: 0b10 = the packet carries the ODR
 // timestamp (TMST_CONFIG.TMST_EN, on at power-on, 1 us per LSB at TMST_RES = 0).
+#define ICM42688_FIFO_HEADER_MSG         0x80  // Empty / message packet
+#define ICM42688_FIFO_HEADER_ACCEL       0x40  // Packet carries accel data
+#define ICM42688_FIFO_HEADER_GYRO        0x20  // Packet carries gyro data
+#define ICM42688_FIFO_HEADER_20          0x10  // 20-bit packet (packet 4)
 #define ICM42688_FIFO_HEADER_TMST_MASK   0x0C
 #define ICM42688_FIFO_HEADER_TMST_ODR    0x08
 
@@ -354,6 +358,11 @@ public:
   // wraps; this accumulates it into 32 across refills.
   uint32_t getLostPacketCount();
   void resetLostPacketCount();
+  // Times the FIFO read lost packet alignment - a data packet whose header did
+  // not say accel + gyro in the configured layout - and was flushed to recover.
+  // The read that finds it returns false; samples resume with the next packet.
+  // Should stay 0; it grows when the FIFO overflows mid-packet.
+  uint32_t getFIFOResyncCount();
 
   // --- Anti-alias filter (AAF) ---
   // The AAF sits in front of the decimator and is what keeps vibration above
@@ -577,7 +586,8 @@ private:
 
   bool _fifoOverflowFlag = false;
   uint32_t _fifoOverflowCount = 0;
-  uint32_t _lostPacketTotal = 0;    // Accumulated across wraps of the 16-bit register
+  uint32_t _lostPacketTotal = 0;
+  uint32_t _fifoResyncCount = 0;    // Alignment lost and recovered, see nextFIFOPacket()    // Accumulated across wraps of the 16-bit register
   uint16_t _lostPacketLastRaw = 0;  // Previous raw reading, to detect the wrap
   bool _lostPacketPrimed = false;
 
@@ -594,6 +604,7 @@ private:
   bool _fifoTsValid = false;
 
   void resetFilterState();
+  unsigned long calibrationReadPeriodUs();     // Flushes the FIFO; 0 = read as fast as samples arrive
   bool sensorsOffForConfig();                  // Section 12.9 bracket; true if they were running
   void sensorsOnAfterConfig(bool wasRunning);
   bool writeAntiAliasFilter(bool doGyro, uint8_t gyroDelt, bool doAccel, uint8_t accelDelt);
