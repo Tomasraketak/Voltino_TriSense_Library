@@ -81,6 +81,7 @@ getGyroOffsetZ	KEYWORD2
 getGyroSoftwareOffset	KEYWORD2
 getLinearAcceleration	KEYWORD2
 getLostPacketCount	KEYWORD2
+getFIFOResyncCount	KEYWORD2
 getMagHeadingDegrees	KEYWORD2
 getMode	KEYWORD2
 getODRHz	KEYWORD2

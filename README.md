@@ -8,6 +8,8 @@
 
 The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
 
+> **Fixed in v1.7.1:** gyro/accel calibration at an ODR above 1 kHz. `autoCalibrateGyro()` and `autoCalibrateAccel()` read on a fixed 1 ms clock, so at 2 kHz the FIFO overflowed for most of the run, an overflow can leave the FIFO read mid-packet, and the calibration then averaged shifted bytes into the offset (on a real module: −157 / −143 / −157 °/s on a still board). The calibration loops now drain the FIFO as fast as samples arrive, and every FIFO read checks the packet header and resynchronises the FIFO when alignment is lost (`getFIFOResyncCount()`).
+>
 > **New in v1.7.0:** ICM-42688-P sample tap — `imu.setSampleTap(fn, ctx)` passes every sample `readIMU()`/`readFIFO()` hands out to a callback, so a second consumer (e.g. a vibration analyser) sees the full stream while the fusion code stays the only FIFO reader ([details](#-sample-tap--a-second-consumer-without-a-second-fifo-reader)).
 
 > **New in v1.6.0:** SPI pin release on RP2040/RP2350, AVR, megaAVR, SAMD, ESP32, Teensy and STM32 — removes a 30–50 mA cross-conduction between the MCU and the TriSense Pro's SCK/MOSI level shifter ([details](#spi-pin-release-trisense-pro-level-shifter)), I2C interface of the IMU disabled in SPI mode, optional SPI mode 3, `TriSenseConfig` for magnetometer/barometer/IMU rates, `TriSense::sleep()` / `wake()`, BMP580 OSR/ODR validity check, and a `LowPower` example.
@@ -439,6 +441,8 @@ void setup() {
 
 Or manually: Keep the board perfectly still. The code averages gyro samples to find zero-rate offsets and stores them as `gyrOffset[3]`.
 
+With a FIFO enabled the calibration flushes it first and then reads **every** sample the chip produces, as fast as they arrive, at any ODR; without a FIFO it reads the data registers once per sample period. (Up to 1.7.0 both calibrations read on a fixed 1 ms clock, which at ODR > 1 kHz overflowed the FIFO and could return a badly wrong offset.)
+
 ### 2. Accelerometer — 6-Point Sphere Fit
 
 Use `autoCalibrateAccel()`:
@@ -546,6 +550,8 @@ On every buffer refill the driver checks the FIFO count: a count within two pack
 The hardware `FIFO_FULL` bit in `INT_STATUS` is **not** used. On a real module (XIAO RP2350, HiRes, 8 kHz) it read as set on almost every refill while the FIFO held one or two packets and every sample arrived, so it reported overflows that never happened. The driver does not read `INT_STATUS` at all, and leaves `INT_SOURCE0` alone.
 
 When the flag is raised, the driver also reads the chip's own lost-packet counter (`FIFO_LOST_PKT`), which `getLostPacketCount()` accumulates. The counter's baseline is taken on the first FIFO refill after `begin()` / `resetLostPacketCount()`, so packets lost in the **first** overflow are counted too (previously the baseline was taken at the first overflow, and that overflow's losses were silently dropped).
+
+**Packet alignment.** In Stream mode a full FIFO discards its oldest data, and the read pointer can come out of that in the middle of a packet. Every packet read after it is then shifted - a gyro field built from another field's bytes, a large and perfectly steady wrong rate. From v1.7.1 every packet's header is checked (accel + gyro present, `HEADER_20` matching the mode); on a mismatch the driver drops its buffer and flushes the FIFO, that `readIMU()` returns `false`, and reading resumes aligned with the next packet. `getFIFOResyncCount()` counts these events and should stay 0.
 
 **FIFO timestamps.** Every FIFO packet carries the chip's 16-bit ODR timestamp (1 µs per LSB at the power-on `TMST_CONFIG`, chip clock, wraps every 65.536 ms). After `readIMU()` returns a FIFO sample, `getFIFOTimestamp()` gives that packet's timestamp and `hasFIFOTimestamp()` says whether the packet header marked it as one (false in `FIFO_NONE`). The difference of two consecutive timestamps (`uint16_t` subtraction handles the wrap) is the true sample spacing — a gap of about twice the ODR period means a sample is missing, which an INS can use instead of assuming a fixed `dt`:
 
@@ -822,6 +828,7 @@ In the simulation harness (`extras/hosttest`, `make accuracy`), none of the swit
 | `getFIFOOverflowCount()` | Total overflow events since boot |
 | `resetFIFOOverflowCount()` | Clear the overflow counter and flag |
 | `getLostPacketCount()` / `resetLostPacketCount()` | Packets the chip reports having discarded (`FIFO_LOST_PKT`) |
+| `getFIFOResyncCount()` | Times a misaligned FIFO packet was detected and the FIFO flushed to recover (should stay 0) |
 | `hasFIFOTimestamp()` / `getFIFOTimestamp()` | 16-bit ODR timestamp (µs) of the last FIFO packet returned |
 | `setAntiAliasFilter(gyroHz, accelHz)` | Nearest AAF table row for each (`0` = off); see [Anti-alias and UI filters](#anti-alias-and-ui-filters-icm-42688-p) |
 | `setGyroAntiAliasFilter(hz)` / `setAccelAntiAliasFilter(hz)` | One AAF only |
